@@ -1,0 +1,104 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main, uat]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: shellcheck
+        run: shellcheck -S warning ohermes Infrastructure/ops/scripts/*.sh Infrastructure/hermes/start.sh Infrastructure/hermes/tests/live-check.sh Infrastructure/egress/start.sh Infrastructure/deploy/deploy.sh Infrastructure/host/firewall.sh
+      - name: python syntax
+        run: python3 -m py_compile Infrastructure/hermes/setup.py Infrastructure/hermes/model_capture.py Infrastructure/hermes/verify_guard_log.py
+      - name: org-guard unit tests
+        run: python3 -m unittest discover -s Infrastructure/hermes/plugins/org-guard/tests -v
+      - name: compose config
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+      - name: caddy config
+        run: |
+          image="$(grep -E '^CADDY_IMAGE=' .env.example | cut -d= -f2)"
+          # one sample employee route, as ohermes writes it (Infrastructure/caddy/generated/ is git-ignored)
+          printf '@emp_ci host ci.{$HERMES_DOMAIN:localhost}\nhandle @emp_ci {\n\timport hermes-route ci.employee.internal\n}\n' \
+            > Infrastructure/caddy/generated/routes.caddy
+          for stage in dev prod; do
+            docker run --rm -e STAGE=$stage -e ORIGIN_SECRET=ci -v "$PWD/Infrastructure/caddy:/etc/caddy:ro" \
+              "${image:-caddy:2.10-alpine}" caddy validate --config /etc/caddy/Caddyfile
+          done
+      - name: egress (squid) config
+        run: |
+          ./ohermes reconf --dry-run > Infrastructure/egress/generated/rules.conf
+          docker run --rm --entrypoint squid -v "$PWD/Infrastructure/egress:/etc/squid/hermes:ro" \
+            "$(grep -E '^EGRESS_IMAGE=' .env.example | cut -d= -f2)" -k parse -f /etc/squid/hermes/squid.conf
+      - name: no secrets or runtime files committed
+        run: |
+          ! git ls-files | grep -E '(^|/)\.env$|^Users/[^_]|^Users/_template/(runtime|model|data)/|^Archive/.+[^p]$|^Backups/.+[^p]$|^Logs/.+[^p]$|^docker-compose\.override\.yml$|^Infrastructure/(egress|caddy)/generated/.+[^p]$'
+
+  # Real secret scanner over the whole history (gitleaks, pinned by image digest — v8.30.1).
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: gitleaks
+        run: |
+          docker run --rm --network none -v "$PWD:/repo:ro" \
+            ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
+            git --redact --no-banner --exit-code 1 /repo
+
+  # Organization-Knowledge Skills are instructions every agent follows (code-like, security review
+  # M-06): flag every change so the sysadmin reviewer (CODEOWNERS) looks at it, and point out URLs
+  # and shell blocks. Informational — the required review is enforced by CODEOWNERS.
+  skills-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: flag Skills changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- 'Organization-Knowledge/**/Skills/**' 'Infrastructure/hermes/skills/**')"
+          if [ -z "$changed" ]; then echo "no Skills changed"; exit 0; fi
+          {
+            echo "### Skills changed — sysadmin review required (CODEOWNERS)"
+            echo "Skills are instructions every agent follows. Check for links, commands and requests to send data out."
+            echo
+            printf -- '- `%s`\n' $changed
+          } >> "$GITHUB_STEP_SUMMARY"
+          for f in $changed; do
+            [ -f "$f" ] || continue
+            echo "::warning file=$f::Skill changed — needs sysadmin review (Organization-Knowledge Skills act like code)"
+            grep -nE 'https?://' "$f" | while IFS=: read -r n _; do echo "::warning file=$f,line=$n::URL in a skill"; done
+            grep -nE '^```(bash|sh|shell|console|zsh|powershell|python)' "$f" | while IFS=: read -r n _; do echo "::warning file=$f,line=$n::shell/code block in a skill"; done
+          done
+
+  # Single required status check for branch rules on main/uat ("validate"): passes only when every
+  # gate job above passed. Add new gate jobs to `needs` so the rule keeps covering them.
+  validate:
+    if: always()
+    needs: [lint, secret-scan]
+    runs-on: ubuntu-latest
+    steps:
+      - name: all gates passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "gate results: $RESULTS"
+          for r in $RESULTS; do [ "$r" = success ] || exit 1; done

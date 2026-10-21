@@ -1,0 +1,141 @@
+# Hermes Open Enterprise — Caddy
+# Path: (Cloudflare Access → Tunnel →) caddy:80 → <name>.employee.internal:9119
+# Only the exact hosts listed in generated/routes.caddy are served: one per active employee,
+#   <EMP_SUBDOMAIN>.<HERMES_DOMAIN> → <name>.employee.internal  (network alias in Users/<name>/compose.yml)
+# `ohermes` rebuilds that file from Users/*/.env (create/update -s/rm/restore/sync) and reloads Caddy.
+# Every other host — unknown subdomains, container or service names, a subdomain that was just
+# changed — gets 404. Upstreams are only <name>.employee.internal aliases: service and container
+# names of this project never contain a dot, so they cannot be targeted (security review R5-01).
+
+{
+	auto_https off
+	admin localhost:2019
+
+	# slow-header clients cannot hold connections open (no write/read-body timeout: the dashboard
+	# chat is a long-lived WebSocket)
+	servers {
+		timeouts {
+			read_header 15s
+			idle 5m
+		}
+	}
+
+	log default {
+		output file /var/log/caddy/caddy.log {
+			roll_size 50MiB
+			roll_keep 100
+			# hard delete after 90 days; the ops container archives after LOG_RETENTION_DAYS
+			roll_keep_for 2160h
+		}
+		# error entries (http.log.error) carry the request headers too: same filter as access.log
+		format filter {
+			request>headers>X-Hermes-Origin delete
+			request>headers>Cf-Access-Jwt-Assertion delete
+			request>headers>Cookie delete
+			request>headers>Authorization delete
+			request>headers>Proxy-Authorization delete
+			wrap json
+		}
+	}
+}
+
+# Cloudflare credentials stop at Caddy: Hermes does not use them, and the agent (inside the
+# Hermes container) must never see the origin secret or the employee's Access token.
+(strip-cloudflare) {
+	header_up -X-Hermes-Origin
+	header_up -Cf-Access-Jwt-Assertion
+	header_up Cookie "(^|;\s*)CF_Authorization=[^;]*;?\s*" "$1"
+}
+
+# One employee's dashboard; {args[0]} = the employee's upstream (<name>.employee.internal).
+# Used only by generated/routes.caddy.
+(hermes-route) {
+	route {
+		# Hermes answers these /api paths without a login (version, commit, install id, host memory/disk,
+		# boot id, config schema, plugin list …). Serve them only to a logged-in session:
+		# Caddy first asks Hermes' own /api/auth/me with the visitor's cookies (2xx = logged in).
+		@info path /api/health /api/status /api/config/defaults /api/config/schema /api/model/info /api/dashboard/themes /api/dashboard/plugins
+		forward_auth @info {args[0]}:9119 {
+			uri /api/auth/me
+			header_up X-Forwarded-Proto {$PUBLIC_SCHEME:https}
+			import strip-cloudflare
+		}
+		# managed-cron webhook of the hosted Nous service — not used here (cron is disabled)
+		@cron_fire path /api/cron/fire /api/cron/fire/*
+		respond @cron_fire "Not found" 404
+
+		reverse_proxy {args[0]}:9119 {
+			header_up X-Forwarded-Proto {$PUBLIC_SCHEME:https}
+			import strip-cloudflare
+		}
+	}
+}
+
+:80 {
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 50MiB
+			roll_keep 100
+			roll_keep_for 2160h
+		}
+		# never write credentials into the log: the Cloudflare origin secret, the Access JWT,
+		# cookies and authorization headers are removed from every entry
+		format filter {
+			request>headers>X-Hermes-Origin delete
+			request>headers>Cf-Access-Jwt-Assertion delete
+			request>headers>Cookie delete
+			request>headers>Authorization delete
+			request>headers>Proxy-Authorization delete
+			resp_headers>Set-Cookie delete
+			wrap json
+		}
+	}
+
+	# upload limit for the dashboard (files attached to a chat)
+	request_body {
+		max_size 64MB
+	}
+
+	# Employees' agents sit on the employee networks and can reach Caddy there.
+	# Refuse them so no agent can proxy into another employee's Hermes.
+	# Exception: each /28's gateway (.1, .17, … .241) — that is the host itself,
+	# which is how Docker delivers published-port traffic.
+	@from_employee_net {
+		remote_ip {$NETWORK_PREFIX:10.213}.0.0/16
+		not expression `{remote_host}.matches("[.](1|17|33|49|65|81|97|113|129|145|161|177|193|209|225|241)$")`
+	}
+	handle @from_employee_net {
+		respond "Forbidden" 403
+	}
+
+	# Health check for on-server tests
+	handle /caddy-health {
+		respond "ok" 200
+	}
+
+	# Stage-specific access rule (access-prod.caddy requires Cloudflare Access)
+	import access-{$STAGE:prod}.caddy
+
+	# one `handle` per active employee (exact host match) — generated, git-ignored; no file = no routes
+	import generated/*.caddy
+
+	handle {
+		respond "Not found" 404
+	}
+
+	handle_errors 502 503 {
+		respond "Hermes instance unavailable" 502
+	}
+
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		# no framing of the dashboard by other sites (clickjacking)
+		X-Frame-Options DENY
+		Content-Security-Policy "frame-ancestors 'none'"
+		Cross-Origin-Opener-Policy same-origin
+		# browsers ignore HSTS on plain http (STAGE=dev); on https it pins the employee's subdomain to TLS
+		Strict-Transport-Security "max-age=31536000"
+	}
+}

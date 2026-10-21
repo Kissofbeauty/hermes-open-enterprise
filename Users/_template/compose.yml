@@ -1,0 +1,143 @@
+# One employee's Hermes. `ohermes create` copies this folder and replaces the service/network placeholder
+# with the employee's server name (e.g. john-doe — from the email, never changes).
+# Values like ${EMP_SUBDOMAIN} come from ./.env (EMP_* names avoid clashing with host variables).
+#
+# At every container start, Infrastructure/hermes/setup.py (as root) writes runtime/:
+# config.yaml (Config/ + AI model + this folder's config.yaml), hermes.env (AI key) and the
+# skill list, then Hermes starts. runtime/ files are mounted READ-ONLY into /opt/data, so neither
+# the agent nor the dashboard can change settings, the AI model or plugins.
+# Files that must exist before `docker compose up` (ohermes create/sync makes them):
+#   runtime/config.yaml  runtime/hermes.env  runtime/auth.json  runtime/SOUL.md  runtime/active_profile
+#   runtime/shell-rc  runtime/hooks/  runtime/empty/
+#
+# Organization-Knowledge is mounted read-only, one folder at a time: the organization's
+# Assign/, the department's Assign/ and this employee's own Skills/KPI/Knowledge.
+# Never mount Organization/, Department/ or a whole department/person folder (it would expose colleagues).
+
+services:
+  __USER__:
+    image: ${HERMES_IMAGE:-nousresearch/hermes-agent:v0.22.2@sha256:36099926da316742423544e055d4734777105ffe6341873af5459b957d0c2919}
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/enterprise/bin/start.sh"]
+    command: ["gateway", "run"]
+    # Employee settings + dashboard login (Users/<name>/.env, never committed)
+    env_file: [.env]
+    environment:
+      # Central AI model (root .env) — read by setup.py, then removed from the environment;
+      # a personal model (ohermes model → ./model/) wins over it.
+      HOE_AI_PROVIDER: ${AI_PROVIDER:-}
+      HOE_AI_MODEL: ${AI_MODEL:-}
+      HOE_AI_BASE_URL: ${AI_BASE_URL:-}
+      HOE_AI_API_KEY: ${AI_API_KEY:-}
+      # setup.py writes a current config; Hermes' own boot migration must not try to (read-only)
+      HERMES_SKIP_CONFIG_MIGRATION: "1"
+      HERMES_DASHBOARD: "1"
+      HERMES_DASHBOARD_HOST: "0.0.0.0"
+      HERMES_DASHBOARD_PORT: "9119"
+      HERMES_DASHBOARD_PUBLIC_URL: ${PUBLIC_SCHEME:-https}://${EMP_SUBDOMAIN:?EMP_SUBDOMAIN missing in .env}.${HERMES_DOMAIN}${PUBLIC_PORT_SUFFIX:-}
+      # read by setup.py
+      PUBLIC_URL: ${PUBLIC_SCHEME:-https}://${EMP_SUBDOMAIN}.${HERMES_DOMAIN}${PUBLIC_PORT_SUFFIX:-}
+      TRUSTED_PROXY: ${EMP_NET_SUBNET}
+      OWNER_USERNAME: ${EMP_USERNAME}
+      OWNER_EMAIL: ${EMP_EMAIL:-}
+      OWNER_DEPARTMENT: ${EMP_DEPARTMENT:-}
+      OWNER_TITLE: ${EMP_TITLE:-}
+      # The employee network is internal (no direct internet): everything goes through
+      # the egress proxy, which applies the website rules of Config/ohermes.conf.
+      HTTP_PROXY: http://egress:3128
+      HTTPS_PROXY: http://egress:3128
+      http_proxy: http://egress:3128
+      https_proxy: http://egress:3128
+      NO_PROXY: localhost,127.0.0.1
+      no_proxy: localhost,127.0.0.1
+      # Node.js (Hermes' node tools) uses the proxy variables only with this flag (Node ≥ 24)
+      NODE_USE_ENV_PROXY: "1"
+      # no Python user site (~/.local/lib/python*/site-packages): a .pth file the agent drops there
+      # would run code at every python start, unseen by org-guard (security review R5-02)
+      PYTHONNOUSERSITE: "1"
+      # the image's PATH puts /opt/data/.local/bin (agent-writable) BEFORE /usr/bin: a script the agent
+      # drops there named ls/git/curl would replace that command in every later shell. Same PATH
+      # without it (Hermes still adds ~/.local/bin at the END for tools installed there).
+      PATH: /opt/hermes/bin:/opt/hermes/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    volumes:
+      - ./data:/opt/data                                         # memory, sessions, workspace
+      # Locked settings (written by setup.py as root; read-only inside /opt/data)
+      - ./runtime:/opt/enterprise/runtime
+      - {type: bind, source: ./runtime/config.yaml, target: /opt/data/config.yaml, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: ./runtime/hermes.env, target: /opt/data/.env, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: ./runtime/auth.json, target: /opt/data/auth.json, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: ./runtime/SOUL.md, target: /opt/data/SOUL.md, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: ./runtime/active_profile, target: /opt/data/active_profile, read_only: true, bind: {create_host_path: false}}
+      # Shell start files in the agent's HOME (/opt/data): one empty root-owned file, read-only, so no
+      # code can be planted that every later shell runs (security review R5-02; Config/enforced.yaml
+      # also sets terminal.auto_source_bashrc: false)
+      - {type: bind, source: ./runtime/shell-rc, target: /opt/data/.profile, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: ./runtime/shell-rc, target: /opt/data/.bash_profile, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: ./runtime/shell-rc, target: /opt/data/.bash_login, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: ./runtime/shell-rc, target: /opt/data/.bashrc, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: ./runtime/shell-rc, target: /opt/data/.bash_logout, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: ./runtime/shell-rc, target: /opt/data/.inputrc, read_only: true, bind: {create_host_path: false}}
+      # models.dev catalog = provider definitions (base URL + key variable): fetched by setup.py at start,
+      # read-only, so the agent cannot add a provider pointing elsewhere (Config/enforced.yaml models_dev)
+      - {type: bind, source: ./runtime/models_dev_cache.json, target: /opt/data/models_dev_cache.json, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: ./runtime/models_dev_cache.etag, target: /opt/data/models_dev_cache.etag, read_only: true, bind: {create_host_path: false}}
+      - ./runtime/hooks:/opt/data/hooks:ro
+      # Hermes profiles carry their own (unlocked) config.yaml: an empty read-only folder instead
+      - ./runtime/empty:/opt/data/profiles:ro
+      # the whole plugins folder: no agent-made plugin can sit next to (or replace) org-guard
+      - ../../Infrastructure/hermes/plugins:/opt/data/plugins:ro
+      - ./model:/opt/enterprise/model:ro                         # personal AI model (ohermes model)
+      - ./config.yaml:/opt/enterprise/user-config.yaml:ro
+      # Only the files setup.py reads — never the whole Config/ folder (Config/ohermes.conf holds
+      # the website rules: the agent must not be able to read them)
+      - {type: bind, source: ../../Config/defaults.yaml, target: /opt/enterprise/config/defaults.yaml, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: ../../Config/enforced.yaml, target: /opt/enterprise/config/enforced.yaml, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: ../../Config/SOUL.md, target: /opt/enterprise/config/SOUL.md, read_only: true, bind: {create_host_path: false}}
+      - ../../Infrastructure/hermes:/opt/enterprise/bin:ro
+      - ../../Infrastructure/hermes/skills:/opt/system/skills:ro
+      # Organization-Knowledge (read-only)
+      - ../../Organization-Knowledge/Organization/Assign:/opt/org/organization:ro                                   # everyone
+      - ../../Organization-Knowledge/Organization/Department/${EMP_DEPARTMENT:?EMP_DEPARTMENT missing in .env}/Assign:/opt/org/department:ro  # this department
+      - ../../Organization-Knowledge/Organization/Department/${EMP_DEPARTMENT}/__USER__/Skills:/opt/org/me/Skills:ro             # this employee only
+      - ../../Organization-Knowledge/Organization/Department/${EMP_DEPARTMENT}/__USER__/KPI:/opt/org/me/KPI:ro
+      - ../../Organization-Knowledge/Organization/Department/${EMP_DEPARTMENT}/__USER__/Knowledge:/opt/org/me/Knowledge:ro
+    networks:
+      __USER__:
+        # Caddy routes exactly <EMP_SUBDOMAIN>.<DOMAIN> → __USER__.employee.internal:9119
+        # (Infrastructure/caddy/generated/routes.caddy, written by ohermes). Service and container
+        # names of this project never contain a dot, so nothing else answers to this name.
+        aliases: ["__USER__.employee.internal"]
+    deploy:
+      resources:
+        limits:
+          cpus: "${EMP_CPUS:-2}"
+          memory: ${EMP_MEMORY:-4g}
+          # no fork bomb can use up the server's process table (security review R5-05)
+          pids: 512
+    # s6-overlay + setup.py run as root at start and need: CHOWN/FOWNER/DAC_OVERRIDE (prepare
+    # /opt/data, which belongs to the hermes user), SETUID/SETGID (drop to the hermes user).
+    # Every other capability is dropped (tested: start, stop, dashboard, tools).
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
+    # Read-only image: only /opt/data (the employee's data) and these tmpfs are writable.
+    # tmpfs sizes are capped (they count against the memory limit). /opt/data is a host folder with
+    # no size limit of its own: put Users/ on its own filesystem / quota (guides/admin.md section 11).
+    read_only: true
+    tmpfs: ["/run:exec,size=64m", "/tmp:size=1g", "/var/tmp:size=256m"]
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      hermes.username: ${EMP_USERNAME}
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+networks:
+  __USER__:
+    # no route to the internet — only Caddy (in) and the egress proxy (out) share this network
+    internal: true
+    ipam:
+      config:
+        - subnet: ${EMP_NET_SUBNET}

@@ -1,0 +1,8 @@
+name: org-guard
+version: "1.0.0"
+description: "Hermes Open Enterprise guard: blocks tool calls that carry secrets, Thai personal data, canary markers or Organization-Knowledge text to the outside; asks approval for uploads/form submits; strips invisible Unicode and marks outside content as untrusted."
+author: "Hermes Open Enterprise"
+provides_hooks:
+  - pre_tool_call
+  - transform_tool_result
+  - transform_terminal_output

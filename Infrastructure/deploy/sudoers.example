@@ -1,0 +1,10 @@
+# /etc/sudoers.d/hermes-deploy — install with: sudo visudo -cf sudoers.example && sudo install -m 440 -o root -g root sudoers.example /etc/sudoers.d/hermes-deploy
+# hermes-deploy may run exactly this command, with exactly this argument, and nothing else.
+# /usr/local/sbin/hermes-deploy is a root-owned COPY of Infrastructure/deploy/deploy.sh: a merged change
+# to deploy.sh itself runs as root only after a sysadmin re-installs it (guides/deploy.md).
+# This does NOT make merges harmless: the deploy runs the repo's `ohermes` and
+# `docker compose up --build` (docker-compose.yml, Users/_template, Infrastructure/ from the checkout)
+# as root. Anyone who can merge to main effectively controls root on this server — protect main with
+# CODEOWNERS review, required "production" environment reviewers and signed commits.
+Defaults!/usr/local/sbin/hermes-deploy env_keep += "SSH_ORIGINAL_COMMAND"
+hermes-deploy ALL=(root) NOPASSWD: /usr/local/sbin/hermes-deploy /srv/hermes-open-enterprise
