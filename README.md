@@ -170,7 +170,10 @@ Organization-Knowledge/Organization/
   Department/General/        employees without a department
 ```
 
-Markdown files take effect immediately. Skill name clashes: Organization > Department > Employee. **Skills are
+`ohermes` creates, moves and archives the department and personal folders; if `Organization-Knowledge/` is its
+own git repository, set `[organization-knowledge] manage_folders = off` in `Config/ohermes.conf` and it never
+touches the folder (it only lists what is missing). Markdown files take effect immediately. Skill name clashes:
+Organization > Department > Employee. **Skills are
 instructions every agent follows** — treat them like code: changes to any `Skills/` folder need sysadmin review
 (CODEOWNERS) and CI flags them. More: [guides/admin.md](guides/admin.md#4-organization-knowledge).
 

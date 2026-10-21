@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `Config/ohermes.conf` `[organization-knowledge] manage_folders = on|off` (default `on`). With `off`
+  (Organization-Knowledge kept in its own repository) `create`, `update -d`, `rm`, `restore` and `sync` never
+  create, move, archive or chmod anything in `Organization-Knowledge/`; they warn with the folder paths to create
+  or move there. `ohermes check` validates the section; `ohermes ls` has an `ORG` column (`ok` / `missing`).
+
 ### Changed
 - Website rules moved from `ohermes.conf` to `Config/ohermes.conf`. For one release `ohermes` still reads
   `./ohermes.conf` (with a warning) when `Config/ohermes.conf` is missing; `ohermes sync` moves it.
