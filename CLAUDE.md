@@ -61,6 +61,9 @@ Archive/ Logs/ Backups/   guides/ (เผยแพร่)   docs/ (private, giti
 - **prod ต้องมี `ORIGIN_SECRET` (≥32) + Cloudflare Transform Rule ใส่ `X-Hermes-Origin`** — ไม่งั้น 403 ทุกคำขอ (ตั้งใจ)
 - Caddy ปฏิเสธคำขอจากวงเครือข่ายพนักงาน ยกเว้น gateway (.1, .17, …) — Docker ส่ง published port ผ่าน gateway ของวงพนักงาน
 - อย่าใช้ one-shot `depends_on: service_completed_successfully` กับ Hermes — ทำให้ทุก `up -d` สร้าง container ใหม่ (QA D2)
+- Linux layout (simple setup): checkout เป็นของ admin (กลุ่ม `docker` = root-equivalent, trade-off ที่ยอมรับ) · `ohermes` re-exec ตัวเองผ่าน `sudo -- <readlink -f ohermes> <args>` เมื่อต้องการ root (`needs_root`: create/update/rm/restore/repasswd/model/sync/reconf เสมอ · ls/check/`reconf -n` เฉพาะเมื่ออ่านไฟล์พนักงานไม่ได้ · `--help`/install/uninstall ไม่เคย) · precheck ด้วย `sudo -l -- <cmd>` (ไม่ใช่ `sudo -v` — Ubuntu/AWS มีทั้ง `%sudo ALL` และ `NOPASSWD:ALL` → `-v` ขอรหัส) · กัน loop: `OHERMES_ELEVATED` + `SUDO_COMMAND`
+- Secrets split: `Users/<name>/.env` = `EMP_*` เท่านั้น (root:<admin group> 640, compose อ่านตอน interpolate/`env_file`) · login dashboard อยู่ `secrets.env` (root 600) mount `:ro` → `start.sh` export (ไม่อยู่ใน `docker inspect`) → `repasswd` ต้อง `--force-recreate` · split เกิดเฉพาะเมื่อ compose.yml mount `secrets.env` แล้ว (`compose_outdated` เช็ค) · `Users/ Archive/ Backups/ Logs/` = root:<admin group> 750 (git ต้อง lstat `.gitkeep`; ops เขียนเป็น root ไม่มี DAC_OVERRIDE) · ไฟล์ที่ ohermes สร้างใน checkout (override, routes, rules.conf, โฟลเดอร์ Organization-Knowledge, `.ohermes-no-install`) → `give_back` ให้เจ้าของ checkout
+- self-install: run แบบ TTY ครั้งแรกถาม `/usr/local/bin/ohermes → checkout` (ไม่ถามเมื่อไม่มี TTY / `CI` / ไม่ใช่ Linux) · `n` → `.ohermes-no-install` · ลิงก์ของ checkout อื่นไม่ทับ
 - Windows dev: `ohermes` ใช้ `cygpath -m` ให้ docker CLI · ต้อง `MSYS_NO_PATHCONV=1` เวลาสั่ง `docker exec` path แบบ `/opt/...`
 - Docker Desktop: Hermes เตือน SQLite บน bind mount (dev เท่านั้น)
 - `setup.py` (root) ห้าม import โมดูล Hermes หรืออ่านไฟล์ที่ agent คุมใน process ของ root — ทำใน `unprivileged()` (fork เป็น uid 10000 + HERMES_HOME ชั่วคราว) ไม่งั้น Hermes สร้างไฟล์ของ root ใน `/opt/data` แล้ว log/skills เขียนไม่ได้ (QA D5)
@@ -91,6 +94,7 @@ docker compose up -d                       # deploy / apply
 ./ohermes reconf [--dry-run]               # apply Config/ohermes.conf web rules to egress (no agent restart)
 ./ohermes model -u <name> [--show|--reset] # personal AI model (interactive, on the server)
 ./ohermes sync                             # rebuild docker-compose.override.yml + runtime files from Users/
+./ohermes install | uninstall              # /usr/local/bin/ohermes → checkout (Linux); server: just `ohermes …`, no sudo
 docker run --rm --network none -v "$PWD/Infrastructure/hermes/plugins/org-guard:/g:ro" --entrypoint /opt/hermes/.venv/bin/python "$HERMES_IMAGE" -m unittest discover -s /g/tests   # org-guard tests
 docker compose exec ops /ops/backup.sh     # backup now
 docker compose exec ops /ops/logs.sh       # logs job now (caddy + egress + docker)

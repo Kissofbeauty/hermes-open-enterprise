@@ -7,9 +7,26 @@
 #     manager) into /opt/data/tools as the hermes user, through the egress proxy, in the background
 #     — needs registry.npmjs.org to be allowed in Config/ohermes.conf when `default deny`
 #  4) hand over to the image's own entrypoint (stays PID 1)
+# Before 4: the dashboard login (HERMES_DASHBOARD_BASIC_AUTH_*) from /opt/enterprise/secrets.env
+# (Users/<name>/secrets.env, root only on the host) is exported — read as data, never executed.
 set -e
 /opt/hermes/.venv/bin/python /opt/enterprise/bin/setup.py
 unset HOE_AI_PROVIDER HOE_AI_MODEL HOE_AI_BASE_URL HOE_AI_API_KEY
+
+if [ -f /opt/enterprise/secrets.env ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    key="${line%%=*}"; val="${line#*=}"
+    case "$key" in HERMES_DASHBOARD_BASIC_AUTH_*) ;; *) continue ;; esac
+    case "$key" in *[!A-Z0-9_]*) continue ;; esac
+    case "$val" in
+      \'*\') val="${val#\'}"; val="${val%\'}" ;;
+      \"*\") val="${val#\"}"; val="${val%\"}" ;;
+    esac
+    export "$key=$val"
+  done < /opt/enterprise/secrets.env
+  unset line key val
+fi
 
 if ! ls -d /opt/data/tools/agent-browser-* >/dev/null 2>&1; then
   (

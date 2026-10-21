@@ -1,6 +1,8 @@
 # One employee's Hermes. `ohermes create` copies this folder and replaces the service/network placeholder
 # with the employee's server name (e.g. john-doe — from the email, never changes).
 # Values like ${EMP_SUBDOMAIN} come from ./.env (EMP_* names avoid clashing with host variables).
+# ./.env holds no secret: Docker Compose reads it as the admin who runs `docker compose`. The dashboard
+# login is in ./secrets.env (root only on the server): mounted read-only, start.sh exports it at start.
 #
 # At every container start, Infrastructure/hermes/setup.py (as root) writes runtime/:
 # config.yaml (Config/ + AI model + this folder's config.yaml), hermes.env (AI key) and the
@@ -20,7 +22,7 @@ services:
     restart: unless-stopped
     entrypoint: ["/bin/sh", "/opt/enterprise/bin/start.sh"]
     command: ["gateway", "run"]
-    # Employee settings + dashboard login (Users/<name>/.env, never committed)
+    # Employee settings (Users/<name>/.env: EMP_* only, never committed)
     env_file: [.env]
     environment:
       # Central AI model (root .env) — read by setup.py, then removed from the environment;
@@ -88,6 +90,8 @@ services:
       - ../../Infrastructure/hermes/plugins:/opt/data/plugins:ro
       - ./model:/opt/enterprise/model:ro                         # personal AI model (ohermes model)
       - ./config.yaml:/opt/enterprise/user-config.yaml:ro
+      # dashboard login (HERMES_DASHBOARD_BASIC_AUTH_*): root:root 0600 — only start.sh (root) reads it
+      - {type: bind, source: ./secrets.env, target: /opt/enterprise/secrets.env, read_only: true, bind: {create_host_path: false}}
       # Only the files setup.py reads — never the whole Config/ folder (Config/ohermes.conf holds
       # the website rules: the agent must not be able to read them)
       - {type: bind, source: ../../Config/defaults.yaml, target: /opt/enterprise/config/defaults.yaml, read_only: true, bind: {create_host_path: false}}
