@@ -1,0 +1,12 @@
+# /home/hermes-deploy/.ssh/authorized_keys on the server (owner hermes-deploy, mode 600).
+# One line, no line breaks. The key can ONLY start the deploy — whatever command the client
+# sends is ignored (it is passed as SSH_ORIGINAL_COMMAND and only written to the log).
+# `restrict` turns off pty, port/agent/X11 forwarding and ~/.ssh/rc; the explicit no-* options
+# repeat it for old OpenSSH versions. Optional: add from="<GitHub runner or bastion CIDR>",
+# right after `restrict,` to accept the key only from known addresses.
+#
+# Recommended (the deploy user is NOT in the docker group; sudo runs one root-owned script — see sudoers.example):
+restrict,no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding,command="sudo -n /usr/local/sbin/hermes-deploy /srv/hermes-open-enterprise" ssh-ed25519 AAAA...replace-with-the-public-key... github-actions-deploy
+#
+# Without sudo (the deploy user is in the docker group = root-equivalent, and must be able to read Users/*/.env):
+# restrict,no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding,command="/srv/hermes-open-enterprise/Infrastructure/deploy/deploy.sh" ssh-ed25519 AAAA... github-actions-deploy

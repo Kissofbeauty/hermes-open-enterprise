@@ -1,0 +1,4 @@
+# Hermes settings for this employee only (the dashboard cannot change settings).
+# Overrides Config/defaults.yaml; Config/enforced.yaml and the AI model (root .env or
+# `ohermes model`) still win. Apply with: docker compose restart <name>. Leave as {} if nothing special.
+{}

@@ -1,0 +1,130 @@
+# Hermes settings the organization ENFORCES on every employee (Hermes v0.22.2 key names, checked
+# against the source). setup.py merges this file last (only the generated keys come after it) into
+# Users/<name>/runtime/config.yaml, which is mounted READ-ONLY — the agent, the employee's
+# dashboard and `hermes config set` cannot change any setting.
+# After editing:  docker compose up -d --force-recreate   (settings are applied at container start)
+
+agent:
+  # web/search: web_search + web_extract send URLs and queries to outside services (not through
+  #   the website rules) · delegation: sub-agents · code_execution: execute_code · cronjob:
+  #   unattended jobs · connections: installs MCP servers · browser-cdp / browser-use: raw CDP
+  #   and arbitrary Python against the browser (file upload, bypass of the browser tools)
+  disabled_toolsets: [web, search, delegation, code_execution, cronjob, connections, browser-cdp, browser-use]
+
+web:
+  # never fall back to free outside search/extract services
+  keyless_fallback: false
+  keyless_rescue: false
+
+browser:
+  # local Chromium only, through the egress proxy — never a cloud browser
+  cloud_provider: local
+  # the built-in browser_* tools (not the Browser Use CLI with arbitrary Python)
+  backend: "off"
+
+tools:
+  connectors:
+    enabled: false
+
+memory:
+  # the agent proposes memory changes; the employee approves them (/memory pending)
+  write_approval: true
+
+auxiliary:
+  background_review:
+    # no automatic memory/skill edits from conversations (tool output included)
+    enabled: false
+
+skills:
+  # don't load skills from repositories employees clone into their workspace
+  project_discovery: false
+  # skill changes by the agent wait for the employee's approval (/skills pending)
+  write_approval: true
+  # security scan of every skill the agent writes
+  guard_agent_created: true
+
+security:
+  redact_secrets: true
+  # Hermes asks before file-tool writes to instruction files outside its home (AGENTS.md, CLAUDE.md,
+  # SOUL.md, .cursorrules built in) — add the other names it loads into the system prompt.
+  # Writes inside /opt/data (memories/, skills/ …) are handled by org-guard.
+  protected_instruction_files: true
+  protected_instruction_extra_patterns: [".hermes.md", "hermes.md", "agents.override.md", "*.mdc"]
+  allow_private_urls: false
+  # no on-demand package installs by the agent (the browser driver is installed at start)
+  allow_lazy_installs: false
+
+terminal:
+  # no extra environment variables into shell commands
+  env_passthrough: []
+  # never source ~/.profile, ~/.bash_profile, ~/.bashrc (HOME = /opt/data, agent-writable) into the
+  # shell snapshot: code planted there would run before every command (security review R5-02).
+  # The files are also empty read-only mounts (Users/_template/compose.yml).
+  auto_source_bashrc: false
+  shell_init_files: []
+
+approvals:
+  # shell commands that are always refused (case-insensitive globs over the whole command, also
+  # matched after de-obfuscation) — reading the process environment or credential files, and
+  # starting another Hermes (a nested Hermes could load a profile/config outside the lock).
+  # org-guard checks the same with a shell-aware parser; these globs are the second layer.
+  deny:
+    - "env"
+    - "env |*"
+    - "printenv*"
+    - "*environ*"
+    - "export -p*"
+    - "declare -x*"
+    - "set | *"
+    - "*/opt/data/.env*"
+    - "* .env*"
+    # the same key in the settings folder written by setup.py, and the personal model key (R5-08)
+    - "*/opt/enterprise/runtime*"
+    - "*/opt/enterprise/model*"
+    - "*hermes.env*"
+    - "*model.env*"
+    - "*auth.json*"
+    - "*BASIC_AUTH*"
+    - "*_API_KEY*"
+    - "*API_SERVER_KEY*"
+    - "*/run/s6/container_environment*"
+    - "hermes"
+    - "hermes *"
+    - "*/hermes"
+    - "*/hermes *"
+    - "*;hermes*"
+    - "*; hermes*"
+    - "*&hermes*"
+    - "*& hermes*"
+    - "*|hermes*"
+    - "*| hermes*"
+    - "*(hermes*"
+    - "*`hermes*"
+    - "*hermes config set*"
+    - "*hermes plugins*"
+    - "*hermes model*"
+    - "*hermes skills publish*"
+    - "*hermes_cli*"
+    - "*run_agent*"
+    - "*-m hermes*"
+    - "*hermes_home*"
+    - "*hermes_profile*"
+    - "*ignore-user-config*"
+    - "*ignore_user_config*"
+  cron_mode: deny
+  unattended_mode: deny
+
+models_dev:
+  # The models.dev catalog defines providers (base URL + key variable). setup.py fetches it at every start
+  # and mounts it READ-ONLY at /opt/data/models_dev_cache.json; Hermes' own refresh is pointed at a closed
+  # local port so the catalog cannot change until the next start (no provider appears after start).
+  url: "http://127.0.0.1:9/hermes-open-enterprise-catalog-is-fixed-at-start"
+
+org_guard:
+  # (e) a tool call that sends this many characters (or more) copied verbatim from
+  # Organization-Knowledge to the outside is blocked (whitespace and case are ignored)
+  min_org_chars: 200
+
+plugins:
+  # the organization's guard (Infrastructure/hermes/plugins/org-guard, mounted read-only)
+  enabled: [org-guard]

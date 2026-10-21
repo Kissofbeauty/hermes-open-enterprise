@@ -1,0 +1,54 @@
+# Deploy main to the server: SSH with a deploy-only key whose server side runs ONE fixed command
+# (Infrastructure/deploy/deploy.sh via a forced command). Setup: guides/deploy.md.
+#
+# Turned off until the repository variable DEPLOY_ENABLED is "true" (so the public template and
+# copies without a server do not fail). Approval/branch rules live in the `production` environment.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+# one deploy at a time; a newer push waits instead of cancelling a running deploy
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    environment: production
+    # rolling restart takes ~15-30 s per employee; raise for large organizations
+    timeout-minutes: 60
+    steps:
+      - name: Deploy over SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          for v in DEPLOY_HOST DEPLOY_USER DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS; do
+            [ -n "${!v}" ] || { echo "::error::secret $v is not set in the production environment"; exit 1; }
+          done
+          d="$RUNNER_TEMP/deploy-ssh"
+          install -d -m 700 "$d"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$d/key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$d/known_hosts"
+          chmod 600 "$d/key" "$d/known_hosts"
+          # host key must match the pinned known_hosts; no prompts, no other identities
+          ssh -T -i "$d/key" -p "${DEPLOY_PORT:-22}" \
+            -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$d/known_hosts" -o GlobalKnownHostsFile=/dev/null \
+            -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=4 \
+            "$DEPLOY_USER@$DEPLOY_HOST" "deploy $GITHUB_SHA"
+
+      - name: Remove key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/deploy-ssh"

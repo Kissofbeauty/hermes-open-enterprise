@@ -1,0 +1,70 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! **Security vulnerabilities must not be reported here** — see SECURITY.md.
+        Remove secrets, real names, emails, domains and IP addresses from everything you paste.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. cp .env.example .env (STAGE=dev)
+        2. docker compose up -d
+        3. ./ohermes create -e john.doe@example.com -s john
+        4. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - ohermes CLI
+        - Hermes container / setup.py / locked config
+        - org-guard plugin
+        - egress proxy / Config/ohermes.conf
+        - Caddy / Cloudflare
+        - ops (logs, backups)
+        - GitOps deploy
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Stage
+      options: [dev, prod]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Hermes Open Enterprise version / commit
+      placeholder: v0.6.0 or commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: OS, `docker version`, `docker compose version`, HERMES_IMAGE tag.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs (redacted)
+      description: e.g. `docker compose logs <name>`, `Logs/egress/access.log` lines.
+      render: shell

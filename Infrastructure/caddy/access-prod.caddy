@@ -1,0 +1,19 @@
+# STAGE=prod — accept only requests that came through Cloudflare:
+#  1) X-Hermes-Origin must equal ORIGIN_SECRET (set by a Cloudflare Transform Rule — agents never see it)
+#  2) Cf-Access-Jwt-Assertion must be present (added by Cloudflare Access)
+# A missing or short ORIGIN_SECRET (< 32 chars) refuses everything.
+# Caddy checks that the Access token is PRESENT, not its signature or audience (stock Caddy has no
+# JWT validation). Cloudflare must therefore put EVERY hostname under Access: a catch-all Access
+# application for *.<HERMES_DOMAIN> (deny by default / only your IdP group) in addition to the
+# per-employee apps — see guides/admin.md section 2.3 and SECURITY.md.
+# Caddy itself only serves the exact employee hosts in generated/routes.caddy.
+@not_from_cloudflare {
+	not expression `"{$ORIGIN_SECRET:}".size() >= 32 && {header.X-Hermes-Origin} == "{$ORIGIN_SECRET:}"`
+}
+handle @not_from_cloudflare {
+	respond "Forbidden" 403
+}
+@no_access not header Cf-Access-Jwt-Assertion *
+handle @no_access {
+	respond "Forbidden" 403
+}
