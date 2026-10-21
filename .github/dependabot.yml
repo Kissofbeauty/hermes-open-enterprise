@@ -1,0 +1,20 @@
+# Dependabot: pinned GitHub Actions (SHA) and container images (digests).
+# Images in docker-compose.yml / .env.example are written as ${VAR:-image@sha256:…}; if Dependabot does
+# not pick those up, update them by hand (see CONTRIBUTING.md) — the ops Dockerfile base is covered.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: docker
+    directory: /Infrastructure/ops
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly

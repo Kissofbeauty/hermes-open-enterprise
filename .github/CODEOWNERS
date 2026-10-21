@@ -1,0 +1,30 @@
+# CODEOWNERS — who must approve a pull request into main (needs branch protection with
+# "Require review from Code Owners", see guides/deploy.md). Later lines win over earlier ones.
+# In this public repository every path is owned by @Kissofbeauty. Forks / organization copies:
+# split the owners as intended — system paths below to your sysadmin team (e.g. @your-org/sysadmins)
+# and /Organization-Knowledge/ to your content owners (e.g. @your-org/hr); teams need write access.
+
+# Default: everything not listed below
+*                           @Kissofbeauty
+
+# Content owners (HR, Security, Marketing, department heads) may change knowledge and KPI
+# (fork: your content-owners team)
+/Organization-Knowledge/    @Kissofbeauty
+
+# Skills are instructions every agent follows — they act like code (security review M-06), so the
+# sysadmin team must approve every Skills change. This line comes later and wins for Skills/ folders:
+# only the sysadmin team is the code owner there. Content owners still review the wording: the
+# pull request template asks for it and CI (job skills-review) flags every Skills change, with the
+# links and shell blocks in it. To REQUIRE both teams, also add a ruleset/branch rule with 2 approvals.
+# (fork: your sysadmin team, e.g. @your-org/sysadmins)
+/Organization-Knowledge/**/Skills/   @Kissofbeauty
+
+# System settings and anything that runs on the server: sysadmin approval only (fork: your sysadmin team)
+/Config/ohermes.conf        @Kissofbeauty
+/ohermes                    @Kissofbeauty
+/Config/                    @Kissofbeauty
+/Infrastructure/            @Kissofbeauty
+/docker-compose.yml         @Kissofbeauty
+/Users/_template/           @Kissofbeauty
+/.github/                   @Kissofbeauty
+/.env.example               @Kissofbeauty

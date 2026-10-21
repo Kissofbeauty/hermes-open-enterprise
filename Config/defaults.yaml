@@ -1,0 +1,12 @@
+# Starting Hermes settings for every employee (Hermes v0.22.2 key names).
+# Settings are LOCKED: the employee's dashboard cannot change them. A different value for one
+# employee goes into Users/<name>/config.yaml; a value nobody may override goes into enforced.yaml.
+#
+# Merge order at every container start (later wins) → Users/<name>/runtime/config.yaml (read-only):
+#   defaults.yaml → Users/<name>/config.yaml → AI model (personal or central .env) → enforced.yaml
+#   → generated (public URL, trusted proxy, skills, plugins)
+# After editing:  docker compose up -d --force-recreate
+
+dashboard:
+  basic_auth:
+    session_ttl_seconds: 43200 # 12h

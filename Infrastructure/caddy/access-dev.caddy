@@ -1,0 +1,2 @@
+# STAGE=dev — no Cloudflare Access check (local testing only).
+# Never use STAGE=dev on a server reachable from the internet.
