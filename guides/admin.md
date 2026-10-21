@@ -132,10 +132,10 @@ Run on the server with `sudo` (Linux). `<user>` = server name (`jane-smith`) or 
 | Employee leaves | **remove Cloudflare access + revoke personal API keys first** → `sudo ./ohermes rm -u jane-smith` → `Y` (stops the container, moves everything to `Archive/<name>_<date>/`) |
 | Employee returns | `sudo ./ohermes restore -u jane-smith` → give Cloudflare access again |
 | Reset password | `sudo ./ohermes repasswd -u jane-smith` (signs out all sessions) |
-| List | `./ohermes ls` (name · email · subdomain · department · title · status · model (central/personal) · link) |
+| List | `./ohermes ls` (name · email · subdomain · department · title · status · `ORG` = Organization-Knowledge folders `ok`/`missing` · model (central/personal) · link) |
 | Personal AI model | `sudo ./ohermes model -u jane-smith` · `--show` (key: last 4 characters) · `--reset` (back to central) |
 | Rebuild generated files | `sudo ./ohermes sync` (override file, Caddy routes, runtime files; restarts nothing) |
-| Check web rules | `./ohermes check` |
+| Check web rules + `[organization-knowledge]` | `./ohermes check` |
 | Apply web rules | `sudo ./ohermes reconf` · preview: `./ohermes reconf --dry-run` |
 | Help | `./ohermes --help` · `./ohermes create --help` |
 
@@ -148,7 +148,8 @@ Run on the server with `sudo` (Linux). `<user>` = server name (`jane-smith`) or 
 - **Department**: `-d sales` matches an existing department case-insensitively; a new one is capitalized
   (`Sales`); none → `General`.
 - Prefer leaving out `-p`: a password on the command line stays in the shell history.
-- `rm` moves the personal Organization-Knowledge folder into the archive too; `restore` puts it back.
+- `rm` moves the personal Organization-Knowledge folder into the archive too; `restore` puts it back
+  (unless `manage_folders = off`, section 4).
 
 ### Doing it by hand (without `ohermes`)
 
@@ -186,6 +187,36 @@ Organization-Knowledge/Organization/
 - Put canary markers (`HOE-CANARY-<8+ letters/digits>`) in important documents: org-guard blocks any tool call
   containing one.
 
+### Organization-Knowledge in its own repository (`manage_folders = off`)
+
+By default `ohermes` creates, moves and archives the department and personal folders. If
+`Organization-Knowledge/` is a separate (private) git repository maintained by content owners, those changes
+would conflict with it. Switch them off in `Config/ohermes.conf`:
+
+```
+[organization-knowledge]
+manage_folders = off        # on (default) | off — also true/false, yes/no; anything else fails `ohermes check`
+```
+
+| Command | `on` (default, or no section/key) | `off` |
+|---|---|---|
+| `create` | creates `Department/<Dept>/Assign/{Skills,KPI,Knowledge}` and `Department/<Dept>/<name>/{…}` | creates nothing; warns with the exact paths (relative to `Organization-Knowledge/`) still missing; the employee is created anyway |
+| `update -d` | moves the personal folder | moves nothing; warns `old → new` path to move in the knowledge repository |
+| `rm` | moves the personal folder into `Archive/<name>_<date>/Organization-Knowledge/` | leaves it in place; `Archive/<name>_<date>/Organization-Knowledge.README` notes that |
+| `restore` | moves the archived copy back | moves nothing; warns about missing folders. An archive made while `on` keeps its copy in `Archive/<name>_<date>/Organization-Knowledge/` (warned) |
+| `sync` | `chmod 700` on personal folders | never touches Organization-Knowledge |
+| `ls` | `ORG` column: `ok` / `missing` | same |
+
+- Department names still match existing folders case-insensitively; a department without a folder keeps the
+  usual capitalisation (`sales` → `Sales`) and is reported as missing.
+- With `off`, a personal folder may be prepared in the knowledge repository **before** `create` (it does not
+  count as "name already used").
+- Create the listed folders in the knowledge repository (an empty folder needs a file, e.g. `.gitkeep`) and
+  pull it on the server. Until then **Docker creates any missing mount folder itself** (empty, owned by root):
+  the agent starts with empty `/opt/org/...` folders. This is expected; the pull later fills them (a root-owned
+  empty folder may need `sudo` for that pull).
+- Switching between `on` and `off` is safe at any time; `rm` with one setting and `restore` with the other works.
+
 ## 5. Website rules — `Config/ohermes.conf`
 
 Employee networks are `internal` (no direct route, outside names do not resolve). The only way out is the
@@ -195,7 +226,8 @@ the host name only.
 **Format**
 
 - Sections: `[web]` (`default allow|deny`) · `[web:organization]` · `[web:department=<Dept>]` ·
-  `[web:user=<server name>]`
+  `[web:user=<server name>]` — the same file also holds `[organization-knowledge] manage_folders = on|off`
+  (not a web rule, see section 4); `ohermes check` validates both.
 - One rule per line: `<allow|deny>  <site>  <comment>` — site = `example.com` (that host only),
   `*.example.com` (the domain and every subdomain) or **one IP** (`203.0.113.10`, `2001:db8::1`). No paths/ports.
 

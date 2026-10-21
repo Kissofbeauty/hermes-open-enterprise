@@ -137,8 +137,10 @@ where_of() { # <.env path> → "Users/x" or "Archive/x_date"
 
 name_taken() { # <name> → prints where it is used, case-insensitive (Users, Archive, Department folders)
   local n; n="$(lower "$1")"
-  local d
-  for d in "$USERS"/*/ "$ARCHIVE"/*/ "$DEPTS"/*/*/; do
+  local d dirs=("$USERS"/*/ "$ARCHIVE"/*/)
+  # manage_folders = off: a personal folder may be prepared in the knowledge repository before `create`
+  org_off_quiet || dirs+=("$DEPTS"/*/*/)
+  for d in "${dirs[@]}"; do
     [[ -d "$d" ]] || continue
     local b; b="$(basename "$d")"
     case "$d" in
@@ -371,6 +373,67 @@ move_legacy_conf() {
   conf_fallback
 }
 
+# ---------------------------------------------------------------- [organization-knowledge] manage_folders
+# on  (default) = ohermes creates / moves / archives department and employee folders in Organization-Knowledge
+# off           = Organization-Knowledge is managed elsewhere (e.g. its own git repository): ohermes never
+#                 creates, moves, removes or chmods anything in it — it only warns which folders are missing.
+bool_word() { # <word> → prints on | off, returns 1 when it is neither
+  case "$(lower "$1")" in
+    on|true|yes)  printf on ;;
+    off|false|no) printf off ;;
+    *) return 1 ;;
+  esac
+}
+
+# conf_value <file> <section> <key> → raw value of "key = value" in [section] (last one wins; empty if missing)
+conf_value() {
+  [[ -f "$1" ]] || return 0
+  awk -v want="[$2]" -v key="$3" '
+    { sub(/\r$/, ""); s = $0; gsub(/^[ \t]+|[ \t]+$/, "", s) }
+    s == "" || s ~ /^#/ { next }
+    s ~ /^\[/ { insec = (s == want); next }
+    insec {
+      i = index(s, "="); if (i == 0) next
+      k = substr(s, 1, i - 1); v = substr(s, i + 1)
+      gsub(/[ \t]+$/, "", k); sub(/#.*$/, "", v); gsub(/^[ \t]+|[ \t]+$/, "", v)
+      if (k == key) val = v
+    }
+    END { printf "%s", val }' "$1"
+}
+
+ORG_MANAGE=""   # cached: on | off
+org_managed() { # → 0 when ohermes manages the Organization-Knowledge folders (dies on an invalid value)
+  if [[ -z "$ORG_MANAGE" ]]; then
+    local v; v="$(conf_value "$CONF" organization-knowledge manage_folders)"
+    if [[ -z "$v" ]]; then ORG_MANAGE=on
+    else ORG_MANAGE="$(bool_word "$v")" || die "${CONF#"$ROOT"/}: [organization-knowledge] manage_folders must be on or off, not '$v' (see: ohermes check)"
+    fi
+  fi
+  [[ "$ORG_MANAGE" == on ]]
+}
+
+org_off_quiet() { [[ "$(bool_word "$(conf_value "$CONF" organization-knowledge manage_folders)")" == off ]]; }   # never dies
+
+OK_REL="${DEPTS#"$ROOT"/Organization-Knowledge/}"   # Organization/Department — paths as seen inside the knowledge repository
+# org_missing <Dept> <name> → the folders the employee's container mounts that do not exist, one per line,
+# relative to Organization-Knowledge/ (= the root of a separate knowledge repository)
+org_missing() {
+  local s
+  [[ -d "$ROOT/Organization-Knowledge/Organization/Assign" ]] || printf 'Organization/Assign\n'
+  for s in "${ORG_SUB[@]}"; do [[ -d "$DEPTS/$1/Assign/$s" ]] || printf '%s/%s/Assign/%s\n' "$OK_REL" "$1" "$s"; done
+  for s in "${ORG_SUB[@]}"; do [[ -d "$DEPTS/$1/$2/$s" ]] || printf '%s/%s/%s/%s\n' "$OK_REL" "$1" "$2" "$s"; done
+  return 0
+}
+# manage_folders = off: list the folders still to be created in the knowledge repository (nothing is created here)
+warn_org_missing() { # <Dept> <name>
+  local m; m="$(org_missing "$1" "$2")"
+  [[ -n "$m" ]] || return 0
+  [[ -d "$DEPTS/$1" ]] || warn "department folder $OK_REL/$1 does not exist in Organization-Knowledge"
+  warn "Organization-Knowledge is managed outside ohermes (manage_folders = off) — create these folders in it:"
+  local l; while IFS= read -r l; do printf '     %s/\n' "$l" >&2; done <<<"$m"
+  warn "until then Docker creates them empty (owned by root) when $2's container starts"
+}
+
 # check_conf <file> → prints "file:line: error|warning: …"; returns 1 when there are errors.
 # Enforcement: cmd_reconf (egress proxy).
 check_conf() {
@@ -378,7 +441,7 @@ check_conf() {
   if [[ ! -f "$file" ]]; then
     info "no $rel — every website is allowed (default allow)"; return 0
   fi
-  local n=0 errs=0 warns=0 section="" defaults=0 line s a b rest key val
+  local n=0 errs=0 warns=0 section="" defaults=0 line s a b rest key val okseen=" "
   cerr()  { printf '%s:%d: %serror%s: %s\n' "$rel" "$n" "$R" "$N" "$1" >&2; errs=$((errs + 1)); }
   cwarn() { printf '%s:%d: %swarning%s: %s\n' "$rel" "$n" "$Y" "$N" "$1" >&2; warns=$((warns + 1)); }
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -388,6 +451,7 @@ check_conf() {
     [[ -z "$s" || "$s" == \#* ]] && continue
     if [[ "$s" == \[* ]]; then
       if [[ "$s" =~ ^\[web\]$ ]]; then section=web
+      elif [[ "$s" == "[organization-knowledge]" ]]; then section=orgk
       elif [[ "$s" =~ ^\[web:organization\]$ ]]; then section=rules
       elif [[ "$s" =~ ^\[web:(department|user)=([^]]*)\]$ ]]; then
         key="${BASH_REMATCH[1]}"; val="${BASH_REMATCH[2]}"; section=rules
@@ -402,7 +466,20 @@ check_conf() {
           fi
         fi
       else
-        cerr "unknown section '$s' — use [web], [web:organization], [web:department=<Dept>], [web:user=<name>]"; section=bad
+        cerr "unknown section '$s' — use [web], [web:organization], [web:department=<Dept>], [web:user=<name>], [organization-knowledge]"; section=bad
+      fi
+      continue
+    fi
+    if [[ "$section" == orgk ]]; then   # key = value
+      if [[ "$s" =~ ^([A-Za-z_]+)[[:space:]]*=[[:space:]]*([^[:space:]#]*)[[:space:]]*(#.*)?$ ]]; then
+        key="${BASH_REMATCH[1]}"; val="${BASH_REMATCH[2]}"
+        if [[ "$key" != manage_folders ]]; then cerr "unknown setting '$key' in [organization-knowledge] (only manage_folders)"
+        elif ! bool_word "$val" >/dev/null; then cerr "manage_folders must be on or off (also true/false, yes/no), not '$val'"
+        elif [[ "$okseen" == *" $key "* ]]; then cerr "$key is set more than once"
+        else okseen+="$key "
+        fi
+      else
+        cerr "expected 'manage_folders = on|off' in [organization-knowledge], not '$s'"
       fi
       continue
     fi
@@ -559,6 +636,7 @@ gen_rules() {
             else warn "${CONF#"$ROOT"/}:$n: [web:department=$target] not applied — no active employee in that department"; src=skip
             fi
           fi
+        else section=other   # [organization-knowledge]: not a web rule
         fi
         continue
       fi
@@ -703,6 +781,7 @@ cmd_create() {
   department="$(resolve_department "$department")"
   require_admin
   load_env
+  org_managed || true   # validate [organization-knowledge] before anything is created
 
   local where
   if where="$(name_taken "$name")"; then
@@ -731,8 +810,12 @@ cmd_create() {
   cp -R "$TEMPLATE/." "$dir/"
   sed "s/__USER__/$name/g" "$TEMPLATE/compose.yml" > "$dir/compose.yml"
   mkdir -p "$dir/data"
-  ensure_department "$department"
-  ensure_person_dirs "$person"
+  if org_managed; then
+    ensure_department "$department"
+    ensure_person_dirs "$person"
+  else
+    warn_org_missing "$department" "$name"
+  fi
 
   ( umask 077
     cat > "$dir/.env" <<ENV
@@ -811,9 +894,21 @@ cmd_update() {
     new_dept="$(resolve_department "$department")"
     [[ "$new_dept" == "$old_dept" ]] && { info "$name is already in $new_dept"; set_d=0; }
   fi
-  (( set_d )) && [[ -e "$DEPTS/$new_dept/$name" ]] && die "${DEPTS#"$ROOT"/}/$new_dept/$name already exists — move or merge it by hand first"
+  if (( set_d )) && org_managed; then
+    [[ -e "$DEPTS/$new_dept/$name" ]] && die "${DEPTS#"$ROOT"/}/$new_dept/$name already exists — move or merge it by hand first"
+  fi
 
-  if (( set_d )); then
+  if (( set_d )) && ! org_managed; then
+    # manage_folders = off: the personal folder is moved in the knowledge repository, not here
+    env_set "$f" EMP_DEPARTMENT "$new_dept"
+    ok "department: $old_dept → $new_dept (Organization-Knowledge not touched: manage_folders = off)"
+    if [[ -d "$DEPTS/$old_dept/$name" && ! -e "$DEPTS/$new_dept/$name" ]]; then
+      warn "move the personal folder in the Organization-Knowledge repository: $OK_REL/$old_dept/$name → $OK_REL/$new_dept/$name"
+    elif [[ -d "$DEPTS/$old_dept/$name" ]]; then
+      warn "$OK_REL/$old_dept/$name still exists next to $OK_REL/$new_dept/$name — remove the old one in the Organization-Knowledge repository if it is no longer needed"
+    fi
+    warn_org_missing "$new_dept" "$name"
+  elif (( set_d )); then
     # stop first: the personal folders are bind-mounted into the running container
     dc stop "$name" >/dev/null 2>&1 || true
     ensure_department "$new_dept"
@@ -851,14 +946,20 @@ cmd_rm() {
   local dept person dest n=2
   dept="$(env_get "$dir/.env" EMP_DEPARTMENT)"; [[ -n "$dept" ]] || dept=General
   person="$DEPTS/$dept/$name"
-  [[ -e "$dir/$ARCHIVED_ORG" ]] && die "Users/$name/$ARCHIVED_ORG already exists — move it away first"
+  local manage=1; org_managed || manage=0
+  (( manage )) && [[ -e "$dir/$ARCHIVED_ORG" ]] && die "Users/$name/$ARCHIVED_ORG already exists — move it away first"
   dest="$ARCHIVE/${name}_$(date +%F)"
   while [[ -e "$dest" ]]; do dest="$ARCHIVE/${name}_$(date +%F)-$n"; n=$((n + 1)); done
 
   echo
   printf '%s⚠  This does NOT delete any data.%s\n' "$Y$B" "$N"
   echo "   $name's container will be stopped to free resources, and all of their data"
-  echo "   (Users/$name and ${person#"$ROOT"/}) will be moved to ${dest#"$ROOT"/}/"
+  if (( manage )); then
+    echo "   (Users/$name and ${person#"$ROOT"/}) will be moved to ${dest#"$ROOT"/}/"
+  else
+    echo "   (Users/$name) will be moved to ${dest#"$ROOT"/}/"
+    echo "   ${person#"$ROOT"/} stays where it is (manage_folders = off: managed in its own repository)"
+  fi
   [[ "${STAGE:-prod}" != dev ]] && echo "   Don't forget: remove $(env_get "$dir/.env" EMP_EMAIL) from Cloudflare Access + revoke their API key."
   echo
   confirm "Continue?" || { info "cancelled — nothing changed"; exit 0; }
@@ -867,7 +968,7 @@ cmd_rm() {
   dc rm -f "$name" >/dev/null || die "could not remove the $name container — nothing was moved"
   mkdir -p "$ARCHIVE"; chmod 700 "$ARCHIVE" 2>/dev/null || true   # archived .env, chats, KPIs
   # personal Organization-Knowledge folder travels inside the employee folder
-  if [[ -d "$person" ]] && ! mv "$person" "$dir/$ARCHIVED_ORG"; then
+  if (( manage )) && [[ -d "$person" ]] && ! mv "$person" "$dir/$ARCHIVED_ORG"; then
     dc up -d "$name" >/dev/null 2>&1 || true
     die "could not move ${person#"$ROOT"/} — restarted $name, nothing changed"
   fi
@@ -876,6 +977,13 @@ cmd_rm() {
     dc up -d "$name" >/dev/null 2>&1 || true
     die "could not move Users/$name to the archive — restarted $name, nothing changed"
   fi
+  if (( ! manage )); then
+    cat > "$dest/$ARCHIVED_ORG.README" <<NOTE
+Archived with [organization-knowledge] manage_folders = off (Config/ohermes.conf) on $(date +%F):
+the personal folder was NOT moved into this archive. It stayed in the Organization-Knowledge
+repository at $OK_REL/$dept/$name/ (if it existed).
+NOTE
+  fi
   unregister "$name"
   dc up -d --remove-orphans
   caddy_reload || true
@@ -883,6 +991,7 @@ cmd_rm() {
   auto_reconf
 
   ok "$name stopped — data kept in ${dest#"$ROOT"/}/"
+  (( manage )) || warn "Organization-Knowledge not touched (manage_folders = off): archive or remove $OK_REL/$dept/$name in its repository if needed"
   [[ "${STAGE:-prod}" != dev ]] && warn "Cloudflare Access: remove $(env_get "$dest/.env" EMP_EMAIL) from $(env_get "$dest/.env" EMP_SUBDOMAIN).${HERMES_DOMAIN}  ·  revoke their AI provider API key"
   return 0
 }
@@ -895,7 +1004,7 @@ cmd_restore() {
   load_env
   [[ -e "$USERS/$name" ]] && die "$name is already active"
   local candidates=() d pick
-  for d in "$ARCHIVE/${name}_"*; do [[ -d "$d" ]] && candidates+=("$d"); done
+  for d in "$ARCHIVE/${name}_"*; do [[ -f "$d/.env" ]] && candidates+=("$d"); done
   (( ${#candidates[@]} )) || die "no archive found for $REF"
 
   if (( ${#candidates[@]} == 1 )); then
@@ -914,7 +1023,11 @@ cmd_restore() {
   valid_dept_name "${dept:-x}" || { warn "archived department '$dept' is not a valid folder name — using General"; dept=""; }
   dept="$(resolve_department "$dept")"   # older archives may hold e.g. "sales" → Sales
   person="$DEPTS/$dept/$name"
-  [[ -e "$person" ]] && die "${person#"$ROOT"/} already exists — move it away first, nothing changed"
+  local manage=1; org_managed || manage=0
+  # the archived copy only comes back when ohermes manages the folders (an archive made with
+  # manage_folders = off has none: the person folder stayed in Organization-Knowledge and is reused)
+  (( manage )) && [[ -d "$pick/$ARCHIVED_ORG" && -e "$person" ]] \
+    && die "${person#"$ROOT"/} already exists — move it away first, nothing changed"
   where="$(subdomain_owner "$(subdomain_of_env "$pick/.env")")" && [[ "$where" != Archive/* ]]     && die "subdomain is now used by $where — change it in ${pick#"$ROOT"/}/.env first"
 
   echo "Restore $name from ${pick#"$ROOT"/}/ — their memory, data and personal folder come back as they were."
@@ -922,12 +1035,26 @@ cmd_restore() {
 
   local dir="$USERS/$name" f="$USERS/$name/.env"
   mv "$pick" "$dir"
-  ensure_department "$dept"
-  if [[ -d "$dir/$ARCHIVED_ORG" ]]; then
-    mv "$dir/$ARCHIVED_ORG" "$person" || warn "could not move the personal folder back — it is in Users/$name/$ARCHIVED_ORG"
+  rm -f "$dir/$ARCHIVED_ORG.README"
+  if (( manage )); then
+    ensure_department "$dept"
+    if [[ -d "$dir/$ARCHIVED_ORG" ]]; then
+      mv "$dir/$ARCHIVED_ORG" "$person" || warn "could not move the personal folder back — it is in Users/$name/$ARCHIVED_ORG"
+    fi
+    ensure_person_dirs "$person"
+  else
+    if [[ -d "$dir/$ARCHIVED_ORG" ]]; then
+      # archived while manage_folders was on: the copy stays in the archive (no .env there, so it is
+      # not an archived employee) — copy it into the knowledge repository by hand if needed
+      if mkdir -p "$pick" && mv "$dir/$ARCHIVED_ORG" "$pick/$ARCHIVED_ORG"; then
+        warn "the archived personal folder stays in ${pick#"$ROOT"/}/$ARCHIVED_ORG (manage_folders = off) — add it to the Organization-Knowledge repository as $OK_REL/$dept/$name/ if needed"
+      else
+        warn "could not move Users/$name/$ARCHIVED_ORG back to ${pick#"$ROOT"/}/ — it is still in Users/$name/"
+      fi
+    fi
+    warn_org_missing "$dept" "$name"
   fi
-  ensure_person_dirs "$person"
-  upgrade_legacy "$name" "$dept" "$person"
+  upgrade_legacy "$name" "$dept" "$person" "$manage"
   register "$name"
   dc up -d --remove-orphans
   caddy_reload || true
@@ -952,12 +1079,14 @@ compose_outdated() { # <compose.yml>
 
 # Employees archived before v0.6 (Users/<name>/knowledge, EMP_SLUG, dotted EMP_USERNAME,
 # compose.yml mounting Shared/) are brought up to the current layout on restore.
-upgrade_legacy() { # <name> <Dept> <person dir>
+upgrade_legacy() { # <name> <Dept> <person dir> <manage: 1|0>
   local dir="$USERS/$1" f="$USERS/$1/.env"
   [[ "$(env_get "$f" EMP_DEPARTMENT)" == "$2" ]] || env_set "$f" EMP_DEPARTMENT "$2"
   [[ "$(env_get "$f" EMP_USERNAME)" == "$1" ]] || env_set "$f" EMP_USERNAME "$1"
   [[ -n "$(env_get "$f" EMP_SUBDOMAIN)" ]] || env_set "$f" EMP_SUBDOMAIN "$(subdomain_of_env "$f")"
-  if [[ -d "$dir/knowledge" ]]; then
+  if [[ -d "$dir/knowledge" && "${4:-1}" == 0 ]]; then
+    warn "Users/$1/knowledge (old layout) — copy it into $OK_REL/$2/$1/Knowledge in the Organization-Knowledge repository by hand"
+  elif [[ -d "$dir/knowledge" ]]; then
     if cp -R "$dir/knowledge/." "$3/Knowledge/" 2>/dev/null; then
       mv "$dir/knowledge" "$dir/knowledge.migrated"
       info "moved the old Users/$1/knowledge into ${3#"$ROOT"/}/Knowledge (copy kept as Users/$1/knowledge.migrated)"
@@ -1083,7 +1212,8 @@ cmd_sync() {
   [[ "${1:-}" == -h || "${1:-}" == --help ]] && { usage_cmd sync; exit 0; }
   require_admin
   move_legacy_conf
-  local n
+  local n manage=1
+  org_managed || manage=0   # off: Organization-Knowledge is never touched (not even chmod)
   while IFS= read -r n; do
     [[ -n "$n" ]] || continue
     ensure_runtime "$n"
@@ -1094,7 +1224,11 @@ cmd_sync() {
       info "Users/$n/compose.yml regenerated from the template (old file kept as compose.yml.old)"
     fi
     local dept; dept="$(env_get "$USERS/$n/.env" EMP_DEPARTMENT)"
-    [[ -d "$DEPTS/${dept:-General}/$n" ]] && chmod 700 "$DEPTS/${dept:-General}/$n" 2>/dev/null
+    if (( manage )); then
+      [[ -d "$DEPTS/${dept:-General}/$n" ]] && chmod 700 "$DEPTS/${dept:-General}/$n" 2>/dev/null
+    else
+      [[ -z "$(org_missing "${dept:-General}" "$n")" ]] || warn "$n: Organization-Knowledge folders missing (manage_folders = off) — see: ohermes ls"
+    fi
     grep -qE '^[A-Z0-9_]*_API_KEY=..' "$USERS/$n/.env" \
       && warn "Users/$n/.env still holds an AI key — it is no longer used (central AI_* in .env, or: ohermes model -u $n)"
   done < <(active_names)
@@ -1108,26 +1242,30 @@ cmd_ls() {
   load_env
   local running
   running="$(dc ps --services --status running 2>/dev/null || true)"
-  local fmt='%-16s %-28s %-16s %-14s %-18s %-9s %-34s %s\n'
+  # ORG = the Organization-Knowledge folders the container mounts (department Assign/ + personal
+  # Skills/KPI/Knowledge): ok | missing — useful with manage_folders = off (shown in both modes)
+  local fmt='%-16s %-28s %-16s %-14s %-18s %-9s %-8s %-34s %s\n'
   # shellcheck disable=SC2059
-  printf "$B$fmt$N" USERNAME EMAIL SUBDOMAIN DEPARTMENT TITLE STATUS "MODEL (SOURCE)" URL
-  local d f name st model
+  printf "$B$fmt$N" USERNAME EMAIL SUBDOMAIN DEPARTMENT TITLE STATUS ORG "MODEL (SOURCE)" URL
+  local d f name st model dept org
   for d in "$USERS"/*/; do
     name="$(basename "$d")"; [[ "$name" == _* ]] && continue
     f="$d/.env"
     if grep -qx "$name" <<<"$running"; then st=running; else st=stopped; fi
     if [[ "$(model_source "$name")" == personal ]]; then model="$(model_get "$name" default) (personal)"
     else model="${AI_MODEL:-?} (central)"; fi
+    dept="$(env_get "$f" EMP_DEPARTMENT)"
+    if [[ -z "$(org_missing "${dept:-General}" "$name")" ]]; then org=ok; else org=missing; fi
     # shellcheck disable=SC2059
-    printf "$fmt" "$name" "$(env_get "$f" EMP_EMAIL)" "$(subdomain_of_env "$f")" "$(env_get "$f" EMP_DEPARTMENT)" \
-      "$(env_get "$f" EMP_TITLE)" "$st" "$model" "$(user_url "$(subdomain_of_env "$f")")"
+    printf "$fmt" "$name" "$(env_get "$f" EMP_EMAIL)" "$(subdomain_of_env "$f")" "$dept" \
+      "$(env_get "$f" EMP_TITLE)" "$st" "$org" "$model" "$(user_url "$(subdomain_of_env "$f")")"
   done
   for d in "$ARCHIVE"/*/; do
-    [[ -d "$d" ]] || continue
     f="$d/.env"
+    [[ -f "$f" ]] || continue   # e.g. a personal folder left in Archive/ by restore with manage_folders = off
     # shellcheck disable=SC2059
     printf "$fmt" "$(archive_name "$d")" "$(env_get "$f" EMP_EMAIL)" "$(subdomain_of_env "$f")" "$(env_get "$f" EMP_DEPARTMENT)" \
-      "$(env_get "$f" EMP_TITLE)" archived - "Archive/$(basename "$d")"
+      "$(env_get "$f" EMP_TITLE)" archived - - "Archive/$(basename "$d")"
   done
 }
 
@@ -1173,13 +1311,16 @@ ${B}Commands${N}
   rm         stop an employee's container and move their data to Archive/ (nothing is deleted)
   restore    bring an archived employee back with all their memory and data
   repasswd   set a new dashboard password (signs out existing sessions)
-  ls         list employees with email, subdomain, department, title, status and URL
-  check      validate Config/ohermes.conf (website rules)
+  ls         list employees with email, subdomain, department, title, status, Organization-Knowledge folders and URL
+  check      validate Config/ohermes.conf (website rules, [organization-knowledge])
   reconf     apply Config/ohermes.conf to the egress proxy (no restart of any agent)
   model      give one employee a personal AI model + key (Hermes' own picker), show or reset it
   sync       rebuild docker-compose.override.yml (the employee list) from Users/ — run after a deploy
 
 <user> = server name (john-doe) or email (john.doe@example.com).
+Organization-Knowledge folders: create/update/rm/restore create, move and archive them unless
+Config/ohermes.conf sets [organization-knowledge] manage_folders = off (knowledge kept in its own
+repository) — then ohermes never touches Organization-Knowledge and warns which folders are missing.
 Server name = email local part, lowercase, other characters → '-'  (John.Doe@… → john-doe); never changes.
 On Linux run with sudo.
 EOF
@@ -1200,6 +1341,9 @@ ohermes create -e <email> -s <subdomain> [-p <password>] [-d <department>] [-t <
   -t, --title        optional, e.g. "Sales Manager"
 
 Server name, email and subdomain must be unused (Users/ and Archive/).
+Creates Department/<Dept>/Assign/{Skills,KPI,Knowledge} and Department/<Dept>/<name>/{Skills,KPI,Knowledge}
+in Organization-Knowledge — with [organization-knowledge] manage_folders = off (Config/ohermes.conf) it
+creates nothing there and lists the missing folders to add to the knowledge repository instead.
 The AI model and key come from the root .env (AI_PROVIDER, AI_MODEL, AI_API_KEY);
 a personal one is set afterwards with: ohermes model -u <user>
 EOF
@@ -1207,18 +1351,21 @@ EOF
     update) cat <<EOF
 ohermes update -u <user> [-d <department>] [-t <title>] [-e <email>] [-s <subdomain>]
 
-  -d   move to another department (their personal folder moves with them)
+  -d   move to another department (their personal folder moves with them; with
+       manage_folders = off it is not moved — ohermes prints the old → new path to move yourself)
   -t   new title ("" clears it)
   -e   new email (the server name stays the same) — update Cloudflare Access too
   -s   new subdomain — the old link stops working; update Cloudflare Access/DNS
 Only this employee's container is restarted.
 EOF
     ;;
-    rm) echo "ohermes rm -u <user>    stop the container, move Users/<name> and their personal folder to Archive/<name>_<date> (asks Y/n)";;
-    restore) echo "ohermes restore -u <user>    move Archive/<name>_<date> back (personal folder to its department) and start it (asks Y/n)";;
+    rm) echo "ohermes rm -u <user>    stop the container, move Users/<name> and their personal folder to Archive/<name>_<date> (asks Y/n)"
+        echo "                        manage_folders = off: the personal folder stays in Organization-Knowledge";;
+    restore) echo "ohermes restore -u <user>    move Archive/<name>_<date> back (personal folder to its department) and start it (asks Y/n)"
+        echo "                             manage_folders = off: nothing is moved into Organization-Knowledge (missing folders are listed)";;
     repasswd) echo "ohermes repasswd -u <user>    set a new password (asked, shown as *); signs out existing sessions";;
-    ls) echo "ohermes ls    list active, stopped and archived employees, with their AI model (central/personal)";;
-    sync) echo "ohermes sync    rebuild docker-compose.override.yml from Users/ and create missing runtime files (nothing is restarted)";;
+    ls) echo "ohermes ls    list active, stopped and archived employees, their AI model (central/personal) and ORG = ok|missing (Organization-Knowledge folders)";;
+    sync) echo "ohermes sync    rebuild docker-compose.override.yml from Users/ and create missing runtime files (nothing is restarted; never touches Organization-Knowledge with manage_folders = off)";;
     model) cat <<EOF
 ohermes model -u <user> [--show | --reset]      (admins, on the server)
 
@@ -1231,7 +1378,7 @@ ohermes model -u <user> [--show | --reset]      (admins, on the server)
 Only providers that use an API key are supported. The agent can never change its model.
 EOF
     ;;
-    check) echo "ohermes check    validate Config/ohermes.conf and report bad lines (nothing is changed)";;
+    check) echo "ohermes check    validate Config/ohermes.conf ([web…] rules, [organization-knowledge] manage_folders = on|off) and report bad lines (nothing is changed)";;
     reconf) cat <<EOF
 ohermes reconf [--dry-run]
 
