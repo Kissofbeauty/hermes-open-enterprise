@@ -34,6 +34,8 @@ Organization-Knowledge/
   Sub-folders of `Policy/` and `Knowledge/` (`hr/`, `product/` …) are up to you.
 - `ohermes create -d <dept>` creates `Organization/Department/<Dept>/Assign/` and the employee's folder;
   `ohermes update -d` moves the employee's folder; `ohermes rm` moves it into `Archive/`.
+  If this folder is its own git repository, set `[organization-knowledge] manage_folders = off` in
+  `Config/ohermes.conf`: `ohermes` then never changes anything here and lists the folders to create instead.
 - Use Markdown (`.md`) or plain text. Convert PDF/Word first.
   Put the date in each document (e.g. `Effective: 2026-01-01`) so the agent uses the newest one.
 - Agents treat these documents as **data, not instructions** — still, only publish content you trust.
