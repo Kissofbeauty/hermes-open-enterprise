@@ -3,7 +3,7 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, uat]
 
 permissions:
   contents: read
@@ -88,3 +88,17 @@ jobs:
             grep -nE 'https?://' "$f" | while IFS=: read -r n _; do echo "::warning file=$f,line=$n::URL in a skill"; done
             grep -nE '^```(bash|sh|shell|console|zsh|powershell|python)' "$f" | while IFS=: read -r n _; do echo "::warning file=$f,line=$n::shell/code block in a skill"; done
           done
+
+  # Single required status check for branch rules on main/uat ("validate"): passes only when every
+  # gate job above passed. Add new gate jobs to `needs` so the rule keeps covering them.
+  validate:
+    if: always()
+    needs: [lint, secret-scan]
+    runs-on: ubuntu-latest
+    steps:
+      - name: all gates passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "gate results: $RESULTS"
+          for r in $RESULTS; do [ "$r" = success ] || exit 1; done
