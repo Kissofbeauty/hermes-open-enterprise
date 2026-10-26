@@ -26,6 +26,7 @@ expect_fail "set an active profile"                  "echo qa > /opt/data/active
 expect_fail "write SOUL.md"                          "echo x >> /opt/data/SOUL.md"
 expect_fail "write config.yaml"                      "echo x >> /opt/data/config.yaml"
 expect_fail "write .env"                             "echo x >> /opt/data/.env"
+expect_fail "read the dashboard login file"          "cat /opt/enterprise/secrets.env"
 expect_fail "add a gateway hook"                     "mkdir /opt/data/hooks/x"
 # R5-02: shell start files in HOME are empty read-only mounts, and Hermes does not source them
 for f in .profile .bash_profile .bash_login .bashrc .bash_logout .inputrc; do

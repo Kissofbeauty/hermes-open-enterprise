@@ -32,7 +32,7 @@ PR ─► review (CODEOWNERS) + CI ─► merge main ─► workflow "deploy" �
 | 8. `ohermes reconf` (web rules; a bad file keeps the old rules) | exit ≠ 0 |
 
 - Log: `Logs/deploy/<YYYY-MM-DD>.log` and the GitHub Actions log.
-- `.env` on the server is not in git: change it by hand, then `sudo docker compose up -d`.
+- `.env` on the server is not in git: change it by hand, then `docker compose up -d`.
 - Timing: `DEPLOY_HEALTH_TIMEOUT` (120) and `DEPLOY_HEALTH_STABLE` (10) seconds.
 - Organization-Knowledge content is visible to agents right after the merge (read-only mounts, no restart).
 
@@ -40,16 +40,24 @@ PR ─► review (CODEOWNERS) + CI ─► merge main ─► workflow "deploy" �
 
 Examples use `/srv/hermes-open-enterprise` and the user `hermes-deploy` — change them consistently.
 
-### 2.1 Clone (as root)
+### 2.1 Clone (as the admin account)
+
+The checkout belongs to the admin account that runs `docker compose` and `ohermes` (in the `docker` group, see
+[admin.md](admin.md) section 2.2). The folder only has to be fixed, because the sudoers line names it:
 
 ```bash
-sudo git clone git@github.com:<org>/<private-repo>.git /srv/hermes-open-enterprise
-cd /srv/hermes-open-enterprise && sudo git checkout main
+sudo install -d -o "$USER" -g "$USER" /srv/hermes-open-enterprise
+git clone git@github.com:<org>/<private-repo>.git /srv/hermes-open-enterprise
+cd /srv/hermes-open-enterprise && git checkout main
 ```
 
-- **The checkout must belong to root** (or to an account you treat as root). deploy.sh runs as root inside it;
-  whoever owns the folder could otherwise plant symlinks or change `.git` for root to follow. deploy.sh refuses
-  symlinked or foreign-owned `Logs/deploy` entries, but ownership is the real protection.
+- **The checkout owner must be an account you treat as root.** deploy.sh runs as root inside it; whoever owns
+  the folder can change what root runs (and could plant symlinks or change `.git` for root to follow). The
+  admin account qualifies — being in the `docker` group, it is root-equivalent already. Never let the checkout
+  belong to `hermes-deploy` or to anyone without root. deploy.sh runs git as the checkout owner (file ownership
+  in the repo never changes), keeps `Logs/deploy` root-owned 0750 and refuses symlinked or foreign-owned entries
+  there; `ohermes` keeps `Users/`, `Archive/`, `Backups/` and `Logs/` root-owned.
+- A root-owned checkout (older installs) keeps working unchanged.
 - Use a **read-only** GitHub deploy key for `git fetch` (a different key from the one GitHub uses to reach the
   server).
 - Commits made on Windows: check that `ohermes` and `*.sh` are executable (`git ls-files -s ohermes` → `100755`;
@@ -156,9 +164,9 @@ git revert <bad commit>      # or "Revert" on the PR → review → merge → au
 
 | Task | How |
 |---|---|
-| Add/remove/move employees, passwords | `sudo ./ohermes create / update / rm / restore / repasswd` on the server |
-| Personal AI model | `sudo ./ohermes model -u <name>` |
-| `.env` (secrets, image versions) | edit on the server → `sudo docker compose up -d` |
+| Add/remove/move employees, passwords | `ohermes create / update / rm / restore / repasswd` on the server (sudo is automatic) |
+| Personal AI model | `ohermes model -u <name>` |
+| `.env` (secrets, image versions) | edit on the server → `docker compose up -d` |
 | Update the deploy script that runs as root | re-install (section 2.3) |
 | Cloudflare Access applications | Cloudflare dashboard (see [admin.md](admin.md), section 2.3) |
 

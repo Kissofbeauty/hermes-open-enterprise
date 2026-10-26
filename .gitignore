@@ -11,6 +11,7 @@ Users/*
 !Users/_template/
 Users/*/data/
 Users/*/.env
+Users/*/secrets.env
 # generated at every container start (locked Hermes settings + AI key) / personal AI model + key
 Users/*/runtime/
 Users/*/model/
@@ -48,3 +49,6 @@ docs/
 # ---- Python build artefacts ----
 __pycache__/
 *.py[cod]
+
+# ohermes: "do not offer to install the ohermes command again" (see ohermes install --help)
+.ohermes-no-install

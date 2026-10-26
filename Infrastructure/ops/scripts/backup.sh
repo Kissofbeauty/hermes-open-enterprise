@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Daily (02:00):
 #   - every active employee folder (/users/<name>) → /backups/daily|weekly/<name>-<ts>.tar.gz[.age]
-#     (Sundays → weekly). Includes .env (login hash + API key) so a restore is complete.
+#     (Sundays → weekly). Includes .env, secrets.env (login hash) and model/ (API key) so a restore is complete.
 #   - Organization-Knowledge (/org: organization, department and personal skills/KPI/knowledge)
 #     → /backups/daily|weekly/organization-knowledge-<ts>.tar.gz[.age]
 #   - every archived employee (/archive/<name>_<date>) → /backups/archive/ once (it never changes)

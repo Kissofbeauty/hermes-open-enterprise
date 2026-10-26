@@ -33,8 +33,8 @@ main() {
   cd "$root"
 
   # ---- log: Logs/deploy/<date>.log (and stdout for the GitHub Actions log)
-  # The checkout should belong to root (guides/deploy.md). If it does not, its owner could plant
-  # symlinks in Logs/ for root to follow (security review R5-07), so: Logs/deploy is made root-owned
+  # The checkout belongs to root or to the admin account (docker group = root-equivalent, guides/deploy.md).
+  # Its owner could plant symlinks in Logs/ for root to follow (security review R5-07), so: Logs/deploy is made root-owned
   # 0750, entered with `cd -P` and checked there; the log and lock files are opened relative to that
   # directory (no path through a folder someone else controls) and never through a symlink.
   open_log_dir || return 2
@@ -173,7 +173,7 @@ wait_healthy() {
 open_log_dir() {
   local d="$PWD/Logs/deploy" f
   if [[ -L Logs || -L Logs/deploy ]]; then
-    echo "deploy: Logs/ or Logs/deploy is a symlink — refusing (the checkout must belong to root, guides/deploy.md)" >&2
+    echo "deploy: Logs/ or Logs/deploy is a symlink — refusing (see guides/deploy.md section 2.1)" >&2
     return 1
   fi
   mkdir -p Logs/deploy

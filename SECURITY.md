@@ -131,17 +131,25 @@ testing; you are responsible for patching your host kernel and Docker Engine.
 - **Host**: employee networks still have a host address (their gateway). Services on the host listening on
   `0.0.0.0` are reachable from agents unless you apply a host firewall — `Infrastructure/host/firewall.sh`
   (optional, iptables `INPUT` + `DOCKER-USER`).
-- **Host files (Linux)**: `Users/`, `Users/<name>/`, `Archive/` and personal Organization-Knowledge folders are
-  0700 root; `runtime/hermes.env`/`config.yaml`/`auth.json` are 0640 `root:10000` (Hermes reads them through its
-  group); personal model files 0600. Run `chmod 700 Backups` once.
+- **Host files (Linux)**: the checkout belongs to the admin account, which is in the `docker` group and therefore
+  root-equivalent (accepted: it is the account that runs `docker compose`). Employee secrets stay root-only so
+  that account does not read them by accident: `Users/<name>/secrets.env` (dashboard login hash + signing key)
+  0600 root, `model/` and `data/` 0700, `runtime/hermes.env`/`config.yaml`/`auth.json` 0640 `root:10000`
+  (Hermes reads them through its group), `Backups/daily|weekly|archive` 0700 root. `Users/`, `Users/<name>/`,
+  `Archive/`, `Backups/`, `Logs/` are `root:<admin group>` 0750 and `Users/<name>/{.env,compose.yml,config.yaml}`
+  0640 — what Docker Compose reads as the admin (no secret in them). The dashboard login reaches Hermes through
+  a read-only mount read by `start.sh` (root), so it is no longer in `docker inspect`. The root `.env` (central AI
+  key, Cloudflare token, `ORIGIN_SECRET`) is 0600, owned by the admin account. `ohermes` re-runs itself with
+  `sudo` for the commands that need root; only the arguments cross that boundary.
 - **Admins**: anyone with root on the server can read every employee's conversations and memory. Anyone who can
   merge to `main` effectively has root on the server (the deploy runs the repo's `ohermes` and compose files as
   root) — protect `main` with CODEOWNERS, required `production` reviewers and signed commits. The server checkout
-  must belong to root: `deploy.sh` (root) refuses symlinked or foreign-owned log/lock files, but whoever owns the
-  checkout could change what root runs. Organization-Knowledge `Skills/` act like code (every agent follows
+  must belong to root or to the root-equivalent admin account: `deploy.sh` (root) refuses symlinked or
+  foreign-owned log/lock files, but whoever owns the checkout could change what root runs. Organization-Knowledge `Skills/` act like code (every agent follows
   them): they need sysadmin review in CODEOWNERS and CI flags every change.
-- **Backups** contain `.env` files and AI keys (`model/`, `runtime/`) and are unencrypted by default (accepted):
-  `chmod 700 Backups`, and preferably set `BACKUP_AGE_RECIPIENT` and keep the private key off the server.
+- **Backups** contain `.env`/`secrets.env` files and AI keys (`model/`, `runtime/`) and are unencrypted by default
+  (accepted): they are root-only files; preferably set `BACKUP_AGE_RECIPIENT` and keep the private key off the
+  server.
 - **Accepted for the pilot**: one organization-wide AI key readable by every agent (spend limit at the provider;
   `ohermes model -u` for heavy users), the AI provider host always allowed by the proxy, `default allow`.
 - **Supply chain**: every image is pinned to a version and digest; update only after testing on the dev stage.
