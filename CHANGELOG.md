@@ -8,12 +8,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Simple production setup, run as the admin account (in the `docker` group) without sudo:
+  `git clone … && cd hermes-open-enterprise` → `cp .env.example .env && nano .env` → `docker compose up -d` →
+  `./ohermes create …`. The admin account owns the checkout and is root-equivalent through the `docker` group
+  (accepted trade-off, documented); employee secrets stay root-only.
+- `ohermes` re-runs itself with `sudo` when a command needs root (Linux): always for `create`, `update`, `rm`,
+  `restore`, `repasswd`, `model`, `sync`, `reconf`; for `ls`, `check` and `reconf --dry-run` only when the
+  employee files are not readable; never for `--help`, `install`, `uninstall`. Arguments are passed unchanged,
+  nothing else crosses the sudo boundary; a loop guard stops if sudo does not give root.
+- `create`, `repasswd`, `restore` and `update -e` end with a prominent
+  `Dashboard login → username: <server name> (NOT the email)` line; `ohermes ls` labels the column
+  `USERNAME (LOGIN)`; README and the admin guide say the login is the server name, never the email.
+- `ohermes install` / `ohermes uninstall`: the `ohermes` command for all users (`/usr/local/bin/ohermes` → the
+  checkout). The first interactive run offers it once (`n` is remembered in the git-ignored
+  `.ohermes-no-install`); never asked without a terminal, in CI or on Windows/macOS; a link to another checkout is
+  never replaced.
 - `Config/ohermes.conf` `[organization-knowledge] manage_folders = on|off` (default `on`). With `off`
   (Organization-Knowledge kept in its own repository) `create`, `update -d`, `rm`, `restore` and `sync` never
   create, move, archive or chmod anything in `Organization-Knowledge/`; they warn with the folder paths to create
   or move there. `ohermes check` validates the section; `ohermes ls` has an `ORG` column (`ok` / `missing`).
 
 ### Changed
+- The dashboard login (`HERMES_DASHBOARD_BASIC_AUTH_*`) moved from `Users/<name>/.env` to
+  `Users/<name>/secrets.env` (root only, 0600), mounted read-only and exported by `start.sh` at container start
+  (no longer visible in `docker inspect`). `Users/<name>/.env` keeps only `EMP_*` and is readable by the admin's
+  group, so `docker compose` works as the admin account. `repasswd` recreates the employee's container.
+- Owners and modes on Linux: `Users/`, `Archive/`, `Backups/`, `Logs/` and employee folders are
+  `root:<admin group>` 0750 (`.env`/`compose.yml`/`config.yaml` 0640; `secrets.env`, `model/`, `data/`,
+  `Backups/daily|weekly|archive` root only); the root `.env` is set to 0600. Files `ohermes` creates where the
+  admin works (Organization-Knowledge folders, `docker-compose.override.yml`, generated Caddy/egress files) belong
+  to the checkout owner. A root-owned checkout keeps working.
+- The `chmod 700 Backups Archive` install step is gone (`ohermes` does it).
 - Website rules moved from `ohermes.conf` to `Config/ohermes.conf`. For one release `ohermes` still reads
   `./ohermes.conf` (with a warning) when `Config/ohermes.conf` is missing; `ohermes sync` moves it.
 - Employee containers mount only `Config/defaults.yaml`, `Config/enforced.yaml` and `Config/SOUL.md` (not the
@@ -26,6 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   zai, kimi-coding, minimax, nvidia, huggingface, …) and warns when none is known.
 
 ### Upgrade notes
+- Run `ohermes sync` (or `sudo ./ohermes sync`) before `docker compose up -d`: `Users/<name>/compose.yml` gets the
+  `secrets.env` mount and the login moves out of `Users/<name>/.env`. Moving an existing root-owned checkout to
+  the admin account is optional: `guides/admin.md` section 12.
 - Run `sudo ./ohermes sync` then `sudo docker compose up -d`: every `Users/<name>/compose.yml` is regenerated
   (network alias `<name>.employee.internal`, read-only shell start files and models.dev catalog, `pids`, `PATH`,
   `PYTHONNOUSERSITE`;

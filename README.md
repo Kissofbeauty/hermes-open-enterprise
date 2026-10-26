@@ -104,8 +104,11 @@ cd hermes-open-enterprise
 cp .env.example .env               # set AI_PROVIDER, AI_MODEL and AI_API_KEY
 docker compose up -d
 ./ohermes create -e alice.s@example.com -s alice -d Sales -t "Account Manager"   # asks for a password
-# open http://alice.localhost:8080
+# open http://alice.localhost:8080 — log in as alice-s (the server name), NOT the email
 ```
+
+**Dashboard login username = the server name** (`alice-s`, shown by `create` and in `ohermes ls`), never the
+email; the email is only for Cloudflare Access.
 
 `create` also applies the website rules (a fresh install denies all websites until `./ohermes reconf` or the
 first `create`). `STAGE=dev` disables the Cloudflare checks — **never use it on a server reachable from the
@@ -113,32 +116,57 @@ internet.**
 
 ## Production install
 
-1. Install Docker Engine + Compose. Clone your organization's **private** copy as **root** (the checkout must
-   belong to root when auto-deploy is used).
-2. `cp .env.example .env`, `chmod 600 .env`, and set at least:
+**Once per server** (Ubuntu example): install Docker Engine with the Compose plugin, put your admin account in
+the `docker` group, then log out and back in:
 
-   | Key | Value |
-   |---|---|
-   | `STAGE` | `prod` |
-   | `COMPOSE_PROFILES` | `tunnel` (starts cloudflared) |
-   | `HERMES_DOMAIN` · `PUBLIC_SCHEME` · `PUBLIC_PORT_SUFFIX` | `hermes.example.com` · `https` · (empty) |
-   | `CLOUDFLARE_TUNNEL_TOKEN` | token of your tunnel |
-   | `ORIGIN_SECRET` | `openssl rand -hex 32` (≥ 32 characters) |
-   | `AI_PROVIDER` · `AI_MODEL` · `AI_API_KEY` (· `AI_BASE_URL`) | central AI model; set a spending limit on the key |
-   | `BACKUP_AGE_RECIPIENT` | an age public key (keep the private key off the server) |
+```bash
+sudo usermod -aG docker $USER      # then log out and in again
+```
 
-   All keys are described in [guides/admin.md](guides/admin.md#env-keys).
-3. **Cloudflare**:
-   - Tunnel public hostname `*.<domain>` → `http://caddy:80`.
-   - Transform Rule (Modify Request Header) for `*.<domain>`: set `X-Hermes-Origin` = `ORIGIN_SECRET`.
-     Without it every request gets 403 — by design.
-   - Access: a **catch-all application for `*.<domain>`** (deny by default / only your IdP group) **plus** one
-     application per employee subdomain allowing that employee's email. Caddy checks that an Access token is
-     present but cannot verify it, so every hostname must sit behind Access. Optionally enable
-     "Protect with Access" on the tunnel hostname so cloudflared validates the token.
-4. `sudo docker compose up -d` → `sudo ./ohermes reconf` → `sudo ./ohermes create …` per employee.
-5. `sudo chmod 700 Backups Archive`; optionally apply the host firewall
-   (`sudo Infrastructure/host/firewall.sh apply`, see [guides/admin.md](guides/admin.md#11-host-hardening)).
+**Install** (as that admin account, no sudo; use your organization's **private** copy in production):
+
+```bash
+git clone https://github.com/Kissofbeauty/hermes-open-enterprise.git && cd hermes-open-enterprise
+cp .env.example .env && nano .env
+docker compose up -d
+./ohermes create -e alice.s@example.com -s alice -d Sales -t "Account Manager"
+```
+
+The first interactive `./ohermes …` offers to install the `ohermes` command for all users
+(`/usr/local/bin/ohermes` → the checkout); from then on type `ohermes …` anywhere. Commands that read or write
+employee secrets re-run themselves with `sudo` (sudo may ask for your password); nothing else needs sudo.
+
+> **Accepted trade-off.** The admin account owns the checkout and is in the `docker` group, which makes it
+> **root-equivalent** on this server — treat it like root (SSH keys only, few people). What it cannot do without
+> sudo is read the employee secrets: dashboard logins (`Users/<name>/secrets.env`), personal AI keys, chats and
+> memory stay root-only files. The root `.env` (central AI key, Cloudflare token, `ORIGIN_SECRET`) belongs to the
+> admin account, mode 600 (`ohermes` sets it).
+
+Settings in `.env` — at least:
+
+| Key | Value |
+|---|---|
+| `STAGE` | `prod` |
+| `COMPOSE_PROFILES` | `tunnel` (starts cloudflared) |
+| `HERMES_DOMAIN` · `PUBLIC_SCHEME` · `PUBLIC_PORT_SUFFIX` | `hermes.example.com` · `https` · (empty) |
+| `CLOUDFLARE_TUNNEL_TOKEN` | token of your tunnel |
+| `ORIGIN_SECRET` | `openssl rand -hex 32` (≥ 32 characters) |
+| `AI_PROVIDER` · `AI_MODEL` · `AI_API_KEY` (· `AI_BASE_URL`) | central AI model; set a spending limit on the key |
+| `BACKUP_AGE_RECIPIENT` | an age public key (keep the private key off the server) |
+
+All keys are described in [guides/admin.md](guides/admin.md#env-keys).
+
+**Cloudflare**:
+- Tunnel public hostname `*.<domain>` → `http://caddy:80`.
+- Transform Rule (Modify Request Header) for `*.<domain>`: set `X-Hermes-Origin` = `ORIGIN_SECRET`.
+  Without it every request gets 403 — by design.
+- Access: a **catch-all application for `*.<domain>`** (deny by default / only your IdP group) **plus** one
+  application per employee subdomain allowing that employee's email. Caddy checks that an Access token is
+  present but cannot verify it, so every hostname must sit behind Access. Optionally enable
+  "Protect with Access" on the tunnel hostname so cloudflared validates the token.
+
+Optionally apply the host firewall (`sudo Infrastructure/host/firewall.sh apply`, see
+[guides/admin.md](guides/admin.md#11-host-hardening)).
 
 ## Managing employees — `ohermes`
 
@@ -153,10 +181,12 @@ ohermes model    -u <user> [--show|--reset]   # personal AI model + key (admins,
 ohermes check                       # validate Config/ohermes.conf
 ohermes reconf   [--dry-run]        # apply Config/ohermes.conf to the egress proxy
 ohermes sync                        # rebuild generated files (employee list, Caddy routes, runtime files)
+ohermes install | uninstall         # the `ohermes` command for all users (/usr/local/bin/ohermes, Linux)
 ```
 
 `<user>` is the server name or the email. Server name = email local part, lowercase, other characters → `-`
-(`Alice.S@example.com` → `alice-s`); it never changes. On Linux run with `sudo`. After `create`/`update -s`/
+(`Alice.S@example.com` → `alice-s`); it never changes. No `sudo` to type: on Linux the commands that need root
+re-run themselves with it (`--help`, and `check`/`ls`/`reconf --dry-run` when the files are readable, never do). After `create`/`update -s`/
 `restore`, add or change the employee's Cloudflare Access application; before `rm`, remove it and revoke
 personal API keys. Details: [guides/admin.md](guides/admin.md#3-ohermes-command-reference).
 
@@ -179,7 +209,7 @@ instructions every agent follows** — treat them like code: changes to any `Ski
 
 ## Website rules
 
-`Config/ohermes.conf` (admins only, never visible to agents), applied with `sudo ./ohermes reconf`:
+`Config/ohermes.conf` (admins only, never visible to agents), applied with `ohermes reconf`:
 
 ```
 [web]
@@ -238,8 +268,7 @@ push) and read-only Actions permissions. Step by step: [guides/deploy.md](guides
 
 ## Upgrading
 
-`git pull` (or the automatic deploy) → `sudo ./ohermes sync` → `sudo docker compose up -d` →
-`sudo ./ohermes reconf`. `sync` regenerates outdated `Users/<name>/compose.yml` files from the template (old file
+`git pull` (or the automatic deploy) → `ohermes sync` → `docker compose up -d` → `ohermes reconf`. `sync` regenerates outdated `Users/<name>/compose.yml` files from the template (old file
 kept as `compose.yml.old`) and rebuilds the Caddy routes. Release-specific steps are in [CHANGELOG.md](CHANGELOG.md)
 and [guides/admin.md](guides/admin.md#12-upgrades).
 
@@ -248,9 +277,9 @@ and [guides/admin.md](guides/admin.md#12-upgrades).
 | Symptom | Fix |
 |---|---|
 | Every request 403 in production | `ORIGIN_SECRET` missing/short, or the Transform Rule does not set `X-Hermes-Origin` |
-| 404 for an employee's link | `sudo ./ohermes sync` (rebuilds `Infrastructure/caddy/generated/routes.caddy`) |
-| An employee's container does not start (missing file) | `sudo ./ohermes sync` |
-| All websites refused after install | `sudo ./ohermes reconf` |
+| 404 for an employee's link | `ohermes sync` (rebuilds `Infrastructure/caddy/generated/routes.caddy`) |
+| An employee's container does not start (missing file) | `ohermes sync` |
+| All websites refused after install | `ohermes reconf` |
 | Browser tools missing (`could not install the browser driver`) | allow `registry.npmjs.org`, `ohermes reconf`, restart the employee |
 | Dashboard settings cannot be saved | by design — settings are locked |
 

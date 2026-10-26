@@ -4,7 +4,8 @@
 set -euo pipefail
 export MSYS_NO_PATHCONV=1   # Git Bash on Windows: don't rewrite /paths
 
-ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"   # this script, symlinks resolved (/usr/local/bin/ohermes → checkout)
+ROOT="$(cd "$(dirname "$SELF")" && pwd)"
 COMPOSE_FILE_MAIN="$ROOT/docker-compose.yml"
 OVERRIDE="$ROOT/docker-compose.override.yml"   # generated: the employees (see write_override)
 USERS="$ROOT/Users"
@@ -61,13 +62,209 @@ env_set() { # <file> <KEY> <value> — replace the line if present, otherwise ap
   else
     { cat "$1"; printf '%s=%s\n' "$2" "$(sq "$3")"; } > "$tmp"
   fi
-  cat "$tmp" > "$1"; rm -f "$tmp"; chmod 600 "$1"
+  cat "$tmp" > "$1"; rm -f "$tmp"   # same file (inode): owner and mode are kept
 }
 
 require_admin() {
   if [[ "$(uname -s)" == Linux && $EUID -ne 0 ]]; then
     die "run with sudo (employee secrets are root-only files)"
   fi
+  secure_dirs
+}
+
+# ---------------------------------------------------------------- ownership on the server
+# The checkout belongs to the admin account (git clone without sudo; that account is in the docker
+# group, i.e. root-equivalent). ohermes runs as root (sudo) and keeps two kinds of files apart:
+#   - employee files (Users/, Archive/, Backups/, Logs/): owned by root; the admin's group may only
+#     enter and list the folders and read what `docker compose` itself reads (employee_modes);
+#   - everything the admin edits or `docker compose` reads elsewhere (Organization-Knowledge folders
+#     ohermes creates, docker-compose.override.yml, generated Caddy/egress files, .ohermes-no-install):
+#     given back to the checkout owner (give_back), so the admin can still change them without sudo.
+# A root-owned checkout (older installs) keeps working: owner = root, group = root.
+OWNER_UID="$(stat -c %u "$SELF" 2>/dev/null || echo 0)"
+OWNER_GID="$(stat -c %g "$SELF" 2>/dev/null || echo 0)"
+server_root() { [[ "$(uname -s)" == Linux && $EUID -eq 0 ]]; }
+
+give_back() { # <path>… — chown to the checkout owner (Linux, as root, checkout not owned by root)
+  server_root && [[ "$OWNER_UID" != 0 ]] || return 0
+  chown -h "$OWNER_UID:$OWNER_GID" -- "$@" 2>/dev/null || warn "could not give $* back to the checkout owner"
+}
+
+mkdir_owned() { # <dir> — mkdir -p; the folders it creates belong to the checkout owner
+  local d="$1" new=()
+  while [[ ! -e "$d" && "$d" != / && "$d" != . ]]; do new+=("$d"); d="$(dirname "$d")"; done
+  mkdir -p "$1"
+  (( ${#new[@]} == 0 )) || give_back "${new[@]}"
+}
+
+# Users/ Archive/ Backups/ Logs/: root-owned 0750, group = the checkout owner's group (it may list them —
+# git needs to see the tracked .gitkeep files — but every employee folder inside protects itself).
+# root ownership also lets the ops container (root without DAC_OVERRIDE) write Backups/ and Logs/.
+secure_dirs() {
+  local d
+  for d in "$USERS" "$ARCHIVE" "$ROOT/Backups" "$ROOT/Logs"; do
+    [[ -d "$d" && ! -L "$d" ]] || continue
+    if server_root; then chown root:"$OWNER_GID" "$d" 2>/dev/null || true; fi
+    chmod 750 "$d" 2>/dev/null || true
+  done
+  # root .env (central AI key, tunnel token, ORIGIN_SECRET): its owner (the admin) only — owner unchanged
+  if [[ -f "$ROOT/.env" && ! -L "$ROOT/.env" ]]; then chmod 600 "$ROOT/.env" 2>/dev/null || true; fi
+  for d in "$ROOT"/Backups/{daily,weekly,archive}; do   # backup files: root only (ops writes them as root)
+    [[ -d "$d" && ! -L "$d" ]] || continue
+    if server_root; then chown root:root "$d" 2>/dev/null || true; fi
+    chmod 700 "$d" 2>/dev/null || true
+  done
+}
+
+# Users/<name>/ on the server:
+#   folder, compose.yml, config.yaml, .env (EMP_* only)  root:<admin group> 0750/0640 — what Docker
+#                                                       Compose reads when the admin runs `docker compose`
+#   secrets.env (dashboard login hash + signing key)    root:root 0600 — mounted into the container only
+#   model/ (personal AI key) 0700 root · data/ (chats, memory) 0700 · runtime/ root:hermes 0750 (setup.py)
+# A .env that still holds anything but EMP_* (not split yet: old compose.yml) stays 0600.
+env_public() { ! grep -qvE '^(EMP_[A-Z0-9_]*=.*|#.*|[[:space:]]*)$' "$1"; }
+employee_modes() { # <name>
+  local d="$USERS/$1" f
+  chmod 750 "$d" 2>/dev/null || true
+  chmod 700 "$d/model" 2>/dev/null || true
+  if server_root; then chmod 700 "$d/data"; fi   # dev machines: left to Docker Desktop's file sharing
+  for f in compose.yml config.yaml .env; do
+    [[ -f "$d/$f" && ! -L "$d/$f" ]] || continue
+    if [[ "$f" == .env ]] && ! env_public "$d/.env"; then chmod 600 "$d/.env"; continue; fi
+    chmod 640 "$d/$f"
+    if server_root; then chown root:"$OWNER_GID" "$d/$f"; fi
+  done
+  chmod 600 "$d/secrets.env" "$d/model/model.yaml" "$d/model/model.env" 2>/dev/null || true
+  if server_root; then
+    chown root:"$OWNER_GID" "$d"
+    chown root:root "$d/model"
+    [[ -f "$d/secrets.env" ]] && chown root:root "$d/secrets.env"
+  fi
+  return 0
+}
+
+# Users/<name>/.env keeps the EMP_* settings (read by Docker Compose, which the admin runs as
+# themselves); everything else (dashboard login) moves to secrets.env, root-only, which the container
+# reads at start (Infrastructure/hermes/start.sh). Only once compose.yml mounts secrets.env — an older
+# compose.yml still passes the login through env_file: [.env].
+split_secrets() { # <employee folder>
+  local d="$1" tmp
+  [[ -f "$d/.env" ]] || return 0
+  grep -q 'secrets\.env' "$d/compose.yml" 2>/dev/null || return 0
+  env_public "$d/.env" && { [[ -f "$d/secrets.env" ]] || ( umask 077; : > "$d/secrets.env" ); return 0; }
+  ( umask 077
+    [[ -f "$d/secrets.env" ]] || printf '# %s — dashboard login, managed by ohermes. Root only; never commit.\n' "$(basename "$d")" > "$d/secrets.env"
+    grep -vE '^(EMP_[A-Z0-9_]*=.*|#.*|[[:space:]]*)$' "$d/.env" >> "$d/secrets.env"
+    tmp="$(mktemp)"
+    grep -E '^(EMP_[A-Z0-9_]*=.*|#.*|[[:space:]]*)$' "$d/.env" > "$tmp" || true
+    cat "$tmp" > "$d/.env"; rm -f "$tmp" )
+  info "Users/$(basename "$d"): dashboard login moved from .env to secrets.env (root only)"
+}
+secret_file() { # <name> → the file that holds the dashboard login
+  if [[ -f "$USERS/$1/secrets.env" ]] && grep -q 'secrets\.env' "$USERS/$1/compose.yml" 2>/dev/null; then
+    printf '%s' "$USERS/$1/secrets.env"
+  else printf '%s' "$USERS/$1/.env"; fi
+}
+
+# ---------------------------------------------------------------- sudo (Linux)
+# Commands that read or write employee secrets (root-only files) re-run themselves through sudo:
+#   always:  create update rm restore repasswd model sync reconf
+#   only when the employee files are not readable by the caller (on a server: always):
+#            ls  check  reconf --dry-run
+#   never:   help, <command> --help, install, uninstall (these use sudo only for the link itself)
+# Nothing crosses the sudo boundary but the arguments (sudo resets the environment); a password is
+# asked only after the switch. OHERMES_ELEVATED / SUDO_COMMAND stop a loop if sudo does not give root.
+employee_files_readable() {
+  local p
+  for p in "$USERS" "$ARCHIVE" "$USERS"/*/ "$ARCHIVE"/*/ "$USERS"/*/model; do
+    [[ -e "$p" ]] || continue
+    [[ -r "$p" && -x "$p" ]] || return 1
+  done
+  for p in "$USERS"/*/.env "$ARCHIVE"/*/.env "$USERS"/*/model/model.yaml; do
+    [[ -e "$p" && ! -r "$p" ]] && return 1
+  done
+  return 0
+}
+
+needs_root() { # <command> <args…>
+  [[ "$(uname -s)" == Linux && $EUID -ne 0 ]] || return 1
+  local a dry=0
+  for a in "${@:2}"; do
+    case "$a" in -h|--help) return 1 ;; -n|--dry-run) dry=1 ;; esac
+  done
+  case "$1" in
+    create|update|rm|restore|repasswd|model|sync) return 0 ;;
+    reconf) (( dry )) || return 0; ! employee_files_readable ;;
+    ls|check) ! employee_files_readable ;;
+    *) return 1 ;;
+  esac
+}
+
+elevate() { # <original arguments…> — re-run this script as root through sudo (never returns)
+  local again="${OHERMES_ELEVATED:-}"
+  case "${SUDO_COMMAND:-}" in "$SELF"*|*/bash\ "$SELF"*) again=1 ;; esac   # how elevate runs it
+  [[ -z "$again" ]] || die "still not root after sudo — run as root (employee secrets are root-only files)"
+  command -v sudo >/dev/null 2>&1 || die "run as root (employee secrets are root-only files) — sudo is not installed"
+  local self_cmd=("$SELF"); [[ -x "$SELF" ]] || self_cmd=("$BASH" "$SELF")
+  # may this account run exactly this as root? (sudo's own password prompt, if any, appears here;
+  # its answer is cached for the exec below)
+  sudo -l -- "${self_cmd[@]}" "$@" >/dev/null || die "run with sudo (employee secrets are root-only files): sudo $SELF $*"
+  export OHERMES_ELEVATED=1   # only seen again if sudo keeps the environment and still is not root
+  exec sudo -- "${self_cmd[@]}" "$@"
+}
+
+as_root() { if [[ $EUID -eq 0 ]]; then "$@"; else sudo -- "$@"; fi; }
+
+# ---------------------------------------------------------------- the `ohermes` command (Linux)
+# /usr/local/bin/ohermes → this checkout's ohermes. Offered once, on the first interactive run;
+# "n" is remembered in .ohermes-no-install (git-ignored). Never asked without a terminal, in CI or
+# on Windows/macOS dev machines; an existing /usr/local/bin/ohermes of another checkout is never replaced.
+LINK=/usr/local/bin/ohermes
+NO_INSTALL_MARK="$ROOT/.ohermes-no-install"
+link_is_ours() { [[ -L "$LINK" && "$(readlink -f "$LINK")" == "$SELF" ]]; }
+mark_no_install() { : > "$NO_INSTALL_MARK" 2>/dev/null && give_back "$NO_INSTALL_MARK"; return 0; }
+
+offer_install() {
+  [[ "$(uname -s)" == Linux && -t 0 && -t 1 && -z "${CI:-}" && ! -e "$NO_INSTALL_MARK" ]] || return 0
+  local cur; cur="$(command -v ohermes 2>/dev/null || true)"
+  [[ -n "$cur" && "$(readlink -f "$cur")" == "$SELF" ]] && return 0
+  link_is_ours && return 0
+  if [[ -e "$LINK" || -L "$LINK" ]]; then
+    warn "$LINK already exists and is not this checkout ($(readlink -f "$LINK")) — left as it is; use $SELF here"
+    mark_no_install; return 0
+  fi
+  if confirm "Install the \"ohermes\" command for all users ($LINK → $SELF)?"; then
+    install_link || warn "the ohermes command was not installed — later: $SELF install"
+  else
+    mark_no_install
+    info "Not asking again (install it any time with: $SELF install)"
+  fi
+}
+
+install_link() {
+  if [[ "$(uname -s)" != Linux ]]; then info "ohermes install is for Linux servers — on this machine run ./ohermes"; return 0; fi
+  if link_is_ours; then ok "$LINK already points to $SELF"; rm -f "$NO_INSTALL_MARK" 2>/dev/null; return 0; fi
+  if [[ -e "$LINK" || -L "$LINK" ]]; then
+    warn "$LINK already exists and is not this checkout ($(readlink -f "$LINK")) — not replaced (remove it first if it is stale)"
+    return 1
+  fi
+  as_root mkdir -p "$(dirname "$LINK")" && as_root ln -s -- "$SELF" "$LINK" || return 1
+  rm -f "$NO_INSTALL_MARK" 2>/dev/null || true
+  ok "installed $LINK → $SELF — run it as: ohermes <command> (no sudo needed)"
+}
+
+uninstall_link() {
+  if [[ "$(uname -s)" != Linux ]]; then info "ohermes uninstall is for Linux servers — nothing to do here"; return 0; fi
+  if link_is_ours; then
+    as_root rm -f -- "$LINK" || return 1
+    ok "removed $LINK (the checkout is not changed) — add it again with: $SELF install"
+  elif [[ -e "$LINK" || -L "$LINK" ]]; then
+    warn "$LINK is not a link to this checkout ($(readlink -f "$LINK")) — not removed"
+    return 1
+  else
+    info "$LINK is not installed"
+  fi
+  mark_no_install   # do not offer it again on the next run
 }
 
 # ---------------------------------------------------------------- names & validation
@@ -115,13 +312,13 @@ resolve_department() {
   printf '%s%s' "$(printf '%s' "${want:0:1}" | tr '[:lower:]' '[:upper:]')" "${want:1}"
 }
 
-ensure_department() { # <Dept> — Department/<Dept>/Assign/{Skills,KPI,Knowledge}
+ensure_department() { # <Dept> — Department/<Dept>/Assign/{Skills,KPI,Knowledge} (new folders: checkout owner)
   local s
-  for s in "${ORG_SUB[@]}"; do mkdir -p "$DEPTS/$1/Assign/$s"; done
+  for s in "${ORG_SUB[@]}"; do mkdir_owned "$DEPTS/$1/Assign/$s"; done
 }
-ensure_person_dirs() { # <dir> — personal KPI/Knowledge/Skills: root only on the server (0700);
-  local s                # the container mounts the sub-folders directly, so it still reads them
-  for s in "${ORG_SUB[@]}"; do mkdir -p "$1/$s"; done
+ensure_person_dirs() { # <dir> — personal KPI/Knowledge/Skills: on the server only the checkout owner (the admin)
+  local s                # and root (0700); the container mounts the sub-folders directly, so it still reads them
+  for s in "${ORG_SUB[@]}"; do mkdir_owned "$1/$s"; done
   chmod 700 "$1" 2>/dev/null || true
 }
 
@@ -280,6 +477,7 @@ write_override() {
     fi
   } > "$tmp"
   cat "$tmp" > "$OVERRIDE"; rm -f "$tmp"
+  chmod 644 "$OVERRIDE" 2>/dev/null || true; give_back "$OVERRIDE"   # read by `docker compose` as the admin
   write_routes
 }
 
@@ -291,7 +489,7 @@ write_override() {
 ROUTES="$ROOT/Infrastructure/caddy/generated/routes.caddy"
 write_routes() {
   local tmp n sub seen=" "
-  mkdir -p "$(dirname "$ROUTES")"
+  mkdir_owned "$(dirname "$ROUTES")"
   tmp="$(mktemp)"
   {
     printf '# GENERATED by ohermes from Users/*/.env (EMP_SUBDOMAIN) — do not edit, never commit\n'
@@ -311,7 +509,7 @@ write_routes() {
     done < <(active_names)
   } > "$tmp"
   cat "$tmp" > "$ROUTES"; rm -f "$tmp"
-  chmod 644 "$ROUTES" 2>/dev/null || true
+  chmod 644 "$ROUTES" 2>/dev/null || true; give_back "$ROUTES"
 }
 
 caddy_running() { dc ps --status running --services 2>/dev/null | grep -qx caddy; }
@@ -325,8 +523,8 @@ caddy_reload() {
 
 # Files an employee folder needs before `docker compose up` (bind-mount sources):
 # runtime/ is written by setup.py inside the container (root), model/ by `ohermes model`.
-# Modes (Linux): Users/ and Users/<name>/ 0700 — only root on the server reads the AI key, chats
-# and memory (bind mounts do not need the parent folders to be readable by the container user).
+# Modes (Linux): see employee_modes — only root on the server reads the login, AI key, chats and memory
+# (bind mounts do not need the parent folders to be readable by the container user).
 SHELL_RC_FILES=(.profile .bash_profile .bash_login .bashrc .bash_logout .inputrc)   # mounted from runtime/shell-rc
 ensure_runtime() { # <name>
   local d="$USERS/$1" f
@@ -343,12 +541,19 @@ ensure_runtime() { # <name>
         && warn "Users/$1/data/$f was not a plain file — moved aside"
     fi
   done
-  chmod 700 "$USERS" "$d" "$d/model" 2>/dev/null || true
-  chmod 600 "$d/.env" "$d/model/model.yaml" "$d/model/model.env" 2>/dev/null || true
+  split_secrets "$d"
+  employee_modes "$1"
 }
 
 register()   { ensure_runtime "$1"; write_override; }
 unregister() { write_override; }
+
+# The dashboard login username is the server name, never the email (people type the email and get
+# "Invalid username or password") — every command that hands out a login ends with this line.
+login_line() { # <name> <password note>
+  printf '%s➜ Dashboard login → username: %s (NOT the email) · password: %s%s
+' "$B" "$1" "$2" "$N"
+}
 
 user_url() { echo "${PUBLIC_SCHEME}://$1.${HERMES_DOMAIN}${PUBLIC_PORT_SUFFIX}"; }
 
@@ -733,7 +938,7 @@ cmd_reconf() {
   require_admin
 
   local gen="$EGRESS_DIR/generated" out
-  mkdir -p "$gen"
+  mkdir_owned "$gen"
   gen_rules > "$gen/rules.conf.new" || { rm -f "$gen/rules.conf.new"; die "could not generate the rules — previous rules stay active"; }
   if ! out="$(squid_parse rules.conf.new 2>&1)"; then
     printf '%s\n' "$out" | grep -E 'ERROR|FATAL|unrecognized|Bungled' >&2 || printf '%s\n' "$out" | tail -n 5 >&2
@@ -742,6 +947,7 @@ cmd_reconf() {
   fi
   [[ -f "$gen/rules.conf" ]] && cp -p "$gen/rules.conf" "$gen/rules.conf.prev"
   mv -f "$gen/rules.conf.new" "$gen/rules.conf"
+  chmod 644 "$gen/rules.conf"; give_back "$gen/rules.conf"
   if ! squid_reload; then
     if [[ -f "$gen/rules.conf.prev" ]]; then mv -f "$gen/rules.conf.prev" "$gen/rules.conf"; else rm -f "$gen/rules.conf"; fi
     squid_reload >/dev/null 2>&1 || true
@@ -819,7 +1025,7 @@ cmd_create() {
 
   ( umask 077
     cat > "$dir/.env" <<ENV
-# $name — managed by ohermes. Never commit this file.
+# $name — managed by ohermes (no secrets: read by Docker Compose). Never commit this file.
 EMP_USERNAME=$(sq "$name")
 EMP_EMAIL=$(sq "$email")
 EMP_SUBDOMAIN=$(sq "$subdomain")
@@ -830,16 +1036,15 @@ EMP_NET_ID=$(sq "$net_id")
 EMP_NET_SUBNET=$(sq "$(subnet_of "$net_id")")
 EMP_CPUS=$(sq "$DEFAULT_CPUS")
 EMP_MEMORY=$(sq "$DEFAULT_MEMORY")
-
-# Hermes dashboard login
+# Dashboard login: secrets.env (root only). AI model + key: root .env (AI_*), or: ohermes model -u <name>
+ENV
+    cat > "$dir/secrets.env" <<ENV
+# $name — Hermes dashboard login, managed by ohermes. Root only; never commit this file.
 HERMES_DASHBOARD_BASIC_AUTH_USERNAME=$(sq "$name")
 HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH=$(sq "$hash")
 HERMES_DASHBOARD_BASIC_AUTH_SECRET=$(sq "$secret")
-
-# AI model + key: root .env (AI_*) for everyone, or a personal one with: ohermes model -u <name>
 ENV
   )
-  chmod 600 "$dir/.env"
   unset password PASSWORD
 
   register "$name"
@@ -849,11 +1054,12 @@ ENV
   auto_reconf
 
   ok "created $name ($email, $department) → $(user_url "$subdomain")"
-  info "Dashboard login: $name · personal folder: ${person#"$ROOT"/}/"
+  info "Personal folder: ${person#"$ROOT"/}/"
   info "Next:"
   [[ "${STAGE:-prod}" != dev ]] && info "  - Cloudflare Access: allow ${B}$email${N} on ${B}$subdomain.${HERMES_DOMAIN}${N} (until then the catch-all *.${HERMES_DOMAIN} Access app keeps it closed)"
   [[ -z "$AI_API_KEY" ]] && info "  - set AI_PROVIDER / AI_MODEL / AI_API_KEY in .env (central), or: ohermes model -u $name"
-  info "  - send $name the link $(user_url "$subdomain") and the password (by a private channel)"
+  info "  - send $name the link $(user_url "$subdomain"), the username $name and the password (by a private channel)"
+  login_line "$name" "the one you just set"
   return 0
 }
 
@@ -929,6 +1135,7 @@ cmd_update() {
   (( set_s )) && { caddy_reload || true; }
   auto_reconf
   ok "$name restarted → $(user_url "$(env_get "$f" EMP_SUBDOMAIN)")"
+  if (( set_e )); then login_line "$name" "unchanged"; fi
   if [[ "${STAGE:-prod}" != dev ]]; then
     (( set_s )) && warn "the old link $(user_url "$old_sub") no longer works — update Cloudflare Access/DNS to ${subdomain}.${HERMES_DOMAIN}"
     (( set_e )) && warn "update the email in Cloudflare Access to $email"
@@ -966,7 +1173,7 @@ cmd_rm() {
 
   dc stop "$name" || die "could not stop $name — nothing was moved"
   dc rm -f "$name" >/dev/null || die "could not remove the $name container — nothing was moved"
-  mkdir -p "$ARCHIVE"; chmod 700 "$ARCHIVE" 2>/dev/null || true   # archived .env, chats, KPIs
+  mkdir -p "$ARCHIVE"; secure_dirs   # archived .env, chats, KPIs
   # personal Organization-Knowledge folder travels inside the employee folder
   if (( manage )) && [[ -d "$person" ]] && ! mv "$person" "$dir/$ARCHIVED_ORG"; then
     dc up -d "$name" >/dev/null 2>&1 || true
@@ -1060,6 +1267,7 @@ cmd_restore() {
   caddy_reload || true
   auto_reconf
   ok "$name is back ($dept) → $(user_url "$(env_get "$f" EMP_SUBDOMAIN)")"
+  login_line "$name" "unchanged (reset it with: ohermes repasswd -u $name)"
   if [[ -z "$(env_get "$f" EMP_EMAIL)" ]]; then
     warn "$name has no email yet — set it with: ohermes update -u $name -e <email>"
   elif [[ "${STAGE:-prod}" != dev ]]; then
@@ -1074,7 +1282,7 @@ cmd_restore() {
 compose_outdated() { # <compose.yml>
   [[ -f "$1" ]] || return 0
   ! grep -q "Organization-Knowledge" "$1" || ! grep -q "egress:3128" "$1" || ! grep -q "runtime/SOUL.md" "$1" \
-    || ! grep -q "employee.internal" "$1" || ! grep -q "runtime/shell-rc" "$1" || ! grep -q "runtime/models_dev_cache.json" "$1" || grep -qE '\.\./\.\./Config/?:' "$1"
+    || ! grep -q "employee.internal" "$1" || ! grep -q "runtime/shell-rc" "$1" || ! grep -q "runtime/models_dev_cache.json" "$1" || ! grep -q "secrets.env" "$1" || grep -qE '\.\./\.\./Config/?:' "$1"
 }
 
 # Employees archived before v0.6 (Users/<name>/knowledge, EMP_SLUG, dotted EMP_USERNAME,
@@ -1088,6 +1296,9 @@ upgrade_legacy() { # <name> <Dept> <person dir> <manage: 1|0>
     warn "Users/$1/knowledge (old layout) — copy it into $OK_REL/$2/$1/Knowledge in the Organization-Knowledge repository by hand"
   elif [[ -d "$dir/knowledge" ]]; then
     if cp -R "$dir/knowledge/." "$3/Knowledge/" 2>/dev/null; then
+      if server_root && [[ "$OWNER_UID" != 0 ]]; then   # copied as root: the folder belongs to the admin
+        chown -R -h "$OWNER_UID:$OWNER_GID" -- "$3/Knowledge" 2>/dev/null || true
+      fi
       mv "$dir/knowledge" "$dir/knowledge.migrated"
       info "moved the old Users/$1/knowledge into ${3#"$ROOT"/}/Knowledge (copy kept as Users/$1/knowledge.migrated)"
     else
@@ -1106,10 +1317,11 @@ upgrade_legacy() { # <name> <Dept> <person dir> <manage: 1|0>
 cmd_repasswd() {
   parse_u "$@"
   resolve_user "$REF" active
-  local name="$NAME" f="$USERS/$NAME/.env"
-  [[ -f "$f" ]] || die "$REF is not an active employee"
+  local name="$NAME" f
+  [[ -f "$USERS/$NAME/.env" ]] || die "$REF is not an active employee"
   require_admin
   load_env
+  f="$(secret_file "$name")"
   ask_password "$name"; check_password "$PASSWORD"
   local hash secret
   hash="$(printf '%s' "$PASSWORD" | hash_password)" || die "could not hash the password"
@@ -1118,8 +1330,10 @@ cmd_repasswd() {
   secret="$(random_hex)"   # new signing key → existing sessions are logged out
   env_set "$f" HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH "$hash"
   env_set "$f" HERMES_DASHBOARD_BASIC_AUTH_SECRET "$secret"
-  dc up -d "$name"
+  # recreate: the login is read at container start (secrets.env), not part of the compose definition
+  dc up -d --force-recreate "$name"
   ok "password changed for $name (existing sessions were signed out)"
+  login_line "$name" "the one you just set"
 }
 
 # ---------------------------------------------------------------- AI model (central .env / personal)
@@ -1216,21 +1430,22 @@ cmd_sync() {
   org_managed || manage=0   # off: Organization-Knowledge is never touched (not even chmod)
   while IFS= read -r n; do
     [[ -n "$n" ]] || continue
-    ensure_runtime "$n"
     # employees created before the current template: bring their compose.yml up to it
+    # (first: the dashboard login moves to secrets.env only once compose.yml mounts it)
     if compose_outdated "$USERS/$n/compose.yml"; then
       mv "$USERS/$n/compose.yml" "$USERS/$n/compose.yml.old"
       sed "s/__USER__/$n/g" "$TEMPLATE/compose.yml" > "$USERS/$n/compose.yml"
       info "Users/$n/compose.yml regenerated from the template (old file kept as compose.yml.old)"
     fi
+    ensure_runtime "$n"
     local dept; dept="$(env_get "$USERS/$n/.env" EMP_DEPARTMENT)"
     if (( manage )); then
       [[ -d "$DEPTS/${dept:-General}/$n" ]] && chmod 700 "$DEPTS/${dept:-General}/$n" 2>/dev/null
     else
       [[ -z "$(org_missing "${dept:-General}" "$n")" ]] || warn "$n: Organization-Knowledge folders missing (manage_folders = off) — see: ohermes ls"
     fi
-    grep -qE '^[A-Z0-9_]*_API_KEY=..' "$USERS/$n/.env" \
-      && warn "Users/$n/.env still holds an AI key — it is no longer used (central AI_* in .env, or: ohermes model -u $n)"
+    cat "$USERS/$n/.env" "$USERS/$n/secrets.env" 2>/dev/null | grep -qE '^[A-Z0-9_]*_API_KEY=..' \
+      && warn "Users/$n (.env or secrets.env) still holds an AI key — it is no longer used (central AI_* in .env, or: ohermes model -u $n)"
   done < <(active_names)
   write_override
   caddy_reload || true
@@ -1246,7 +1461,7 @@ cmd_ls() {
   # Skills/KPI/Knowledge): ok | missing — useful with manage_folders = off (shown in both modes)
   local fmt='%-16s %-28s %-16s %-14s %-18s %-9s %-8s %-34s %s\n'
   # shellcheck disable=SC2059
-  printf "$B$fmt$N" USERNAME EMAIL SUBDOMAIN DEPARTMENT TITLE STATUS ORG "MODEL (SOURCE)" URL
+  printf "$B$fmt$N" "USERNAME (LOGIN)" EMAIL SUBDOMAIN DEPARTMENT TITLE STATUS ORG "MODEL (SOURCE)" URL
   local d f name st model dept org
   for d in "$USERS"/*/; do
     name="$(basename "$d")"; [[ "$name" == _* ]] && continue
@@ -1303,6 +1518,7 @@ ${B}Usage${N}
   ohermes reconf   [--dry-run]
   ohermes model    -u <user> [--show | --reset]
   ohermes sync
+  ohermes install | uninstall
   ohermes <command> --help
 
 ${B}Commands${N}
@@ -1316,13 +1532,18 @@ ${B}Commands${N}
   reconf     apply Config/ohermes.conf to the egress proxy (no restart of any agent)
   model      give one employee a personal AI model + key (Hermes' own picker), show or reset it
   sync       rebuild docker-compose.override.yml (the employee list) from Users/ — run after a deploy
+  install    add the "ohermes" command for all users (/usr/local/bin/ohermes → this checkout; Linux)
+  uninstall  remove that link (the checkout is not changed)
 
 <user> = server name (john-doe) or email (john.doe@example.com).
+Dashboard login username = the server name (john-doe), never the email.
 Organization-Knowledge folders: create/update/rm/restore create, move and archive them unless
 Config/ohermes.conf sets [organization-knowledge] manage_folders = off (knowledge kept in its own
 repository) — then ohermes never touches Organization-Knowledge and warns which folders are missing.
 Server name = email local part, lowercase, other characters → '-'  (John.Doe@… → john-doe); never changes.
-On Linux run with sudo.
+On Linux, commands that need root (employee secrets are root-only files) re-run themselves with sudo:
+just type ohermes … (sudo may ask for your password). ohermes --help, check, ls and reconf --dry-run
+run without sudo when the files they read are readable to you.
 EOF
 }
 
@@ -1378,6 +1599,15 @@ ohermes model -u <user> [--show | --reset]      (admins, on the server)
 Only providers that use an API key are supported. The agent can never change its model.
 EOF
     ;;
+    install|uninstall) cat <<EOF
+ohermes install      /usr/local/bin/ohermes → $SELF  (asks sudo when needed)
+ohermes uninstall    remove that link; the checkout is not changed
+
+Linux servers only. The first interactive run of any ohermes command offers the install once;
+"n" is remembered in .ohermes-no-install (delete it to be asked again). An /usr/local/bin/ohermes
+that points to another checkout is never replaced.
+EOF
+    ;;
     check) echo "ohermes check    validate Config/ohermes.conf ([web…] rules, [organization-knowledge] manage_folders = on|off) and report bad lines (nothing is changed)";;
     reconf) cat <<EOF
 ohermes reconf [--dry-run]
@@ -1396,6 +1626,8 @@ EOF
 
 # ---------------------------------------------------------------- main
 CMD="${1:-}"; shift || true
+case "$CMD" in install|uninstall) ;; *) offer_install ;; esac
+if needs_root "$CMD" "$@"; then elevate "$CMD" "$@"; fi
 case "$CMD" in
   create)   cmd_create "$@" ;;
   update)   cmd_update "$@" ;;
@@ -1407,6 +1639,8 @@ case "$CMD" in
   reconf)   cmd_reconf "$@" ;;
   model)    cmd_model "$@" ;;
   sync)     cmd_sync "$@" ;;
+  install)   [[ "${1:-}" == -h || "${1:-}" == --help ]] && { usage_cmd install; exit 0; }; install_link ;;
+  uninstall) [[ "${1:-}" == -h || "${1:-}" == --help ]] && { usage_cmd install; exit 0; }; uninstall_link ;;
   -h|--help|help|"") usage ;;
   *) usage >&2; die "unknown command: $CMD" ;;
 esac
