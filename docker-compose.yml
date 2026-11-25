@@ -53,7 +53,7 @@ services:
   # Egress proxy: the ONLY way out to the internet for the agents (employee networks are internal).
   # Website rules: Config/ohermes.conf → `./ohermes reconf` → Infrastructure/egress/generated/rules.conf
   egress:
-    image: ${EGRESS_IMAGE:-ubuntu/squid:6.6-24.04_edge@sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c}
+    image: ${EGRESS_IMAGE:-ubuntu/squid:6.6-24.04_edge@sha256:d9c34c5ab74c6dd41cf1070d9b4221aac072e67e983527ca2d41512958f77506}
     restart: unless-stopped
     entrypoint: ["/bin/sh", "/etc/squid/hermes/start.sh"]
     environment:
